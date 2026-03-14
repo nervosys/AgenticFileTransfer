@@ -56,17 +56,27 @@ fn parse_smb_url(url: &str) -> AftResult<(String, String, String, Option<String>
 }
 
 /// Validate an SMB path component contains only safe characters.
-/// Rejects characters that could enable command injection in smbclient.
+/// Rejects characters that could enable command injection in smbclient,
+/// including control characters, shell metacharacters, and newlines.
 fn validate_smb_component(component: &str, kind: &str) -> AftResult<()> {
     if component.is_empty() {
         return Err(AftError::InvalidUrl(format!("SMB {} is empty", kind)));
     }
+    // Reject any control characters (ASCII 0-31, 127, and C1 range 128-159)
+    for ch in component.chars() {
+        if ch.is_control() || ('\u{0080}'..='\u{009F}').contains(&ch) {
+            return Err(AftError::InvalidUrl(format!(
+                "SMB {} contains control character U+{:04X}. Control characters are not allowed.",
+                kind, ch as u32
+            )));
+        }
+    }
     // Allow alphanumerics, dots, hyphens, underscores, and spaces
     // Reject quotes, backticks, semicolons, pipes, and other shell metacharacters
     for ch in component.chars() {
-        if !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' | ' ' | '(' | ')') {
+        if !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' | ' ') {
             return Err(AftError::InvalidUrl(format!(
-                "SMB {} contains unsafe character '{}'. Only alphanumerics, dots, hyphens, underscores, spaces, and parentheses are allowed.",
+                "SMB {} contains unsafe character '{}'. Only alphanumerics, dots, hyphens, underscores, and spaces are allowed.",
                 kind, ch
             )));
         }

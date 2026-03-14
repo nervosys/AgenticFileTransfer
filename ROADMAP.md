@@ -103,11 +103,30 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 | 52  | Crypto CLI subcommand (`aft crypto keygen/train/encrypt/decrypt`)                    | Done   |
 | 53  | Expanded test suite (131 tests — crypto, neural, classification, DoD protocol)       | Done   |
 
+## Phase 10: Hardening, Performance & CI/CD
+
+| #   | Task                                                                                    | Status |
+| --- | --------------------------------------------------------------------------------------- | ------ |
+| 54  | Plugin signature verification (SHA-256 sidecar `.sha256` files)                          | Done   |
+| 55  | FIPS 140-3 crypto backend feature flag (`--features fips` → aws-lc-rs provider)          | Done   |
+| 56  | SMB control character injection hardening (reject ASCII 0-31, 127, C1 U+0080-U+009F)    | Done   |
+| 57  | Audit logging for HEAD and LIST operations on AFTP server                                | Done   |
+| 58  | `--insecure` stderr warning + audit event (`InsecureMode`)                               | Done   |
+| 59  | Neural training `spawn_blocking` (prevent async runtime blocking)                        | Done   |
+| 60  | History file: append-only JSON Lines format (`history.jsonl`, O(1) writes)               | Done   |
+| 61  | Commit Cargo.lock for reproducible builds                                                | Done   |
+| 62  | Fix `decrypt_block` dead code warning                                                    | Done   |
+| 63  | Crate-level and module doc comments for public APIs                                      | Done   |
+| 64  | Remove `.expect()` / `.unwrap()` from QUIC transport code                                | Done   |
+| 65  | CI pipeline (GitHub Actions: test, clippy, fmt, security audit)                          | Done   |
+| 66  | MSRV policy (`rust-version = "1.75"` in Cargo.toml)                                     | Done   |
+| 67  | Streaming checksum verification (64 KB buffered reads, no full-file load)                | Done   |
+
 ---
 
 ## Current Counts
 
-- **Done:** 53
+- **Done:** 67
 - **Planned:** 0
 
 ## Architecture
@@ -121,7 +140,7 @@ src/
 ├── output.rs              # Structured output (text/json/quiet)
 ├── ontology.rs            # Agentic JSON-LD ontology schema
 ├── config.rs              # Configuration file (~/.aft/config.toml)
-├── history.rs             # Transfer history logging (~/.aft/history.json)
+├── history.rs             # Transfer history logging (~/.aft/history.jsonl, JSON Lines)
 ├── audit.rs               # Security audit logging (~/.aft/audit.log, JSON Lines)
 ├── lib.rs                 # Library re-exports for testing
 ├── plugins.rs             # Plugin system for custom protocol handlers
@@ -152,4 +171,6 @@ src/
     └── dod.rs             # DoD CDS protocol (classification-aware HTTPS)
 tests/
 └── integration_tests.rs   # 131 tests (protocols, security, crypto, neural, classification, DoD)
+.github/
+└── workflows/ci.yml       # CI pipeline (test, clippy, fmt, cargo-audit)
 ```

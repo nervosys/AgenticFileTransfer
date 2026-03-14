@@ -370,22 +370,43 @@ async fn compute_and_verify_checksum(
     path: &Path,
     config: &ChecksumConfig,
 ) -> AftResult<ChecksumResult> {
-    let data = tokio::fs::read(path).await?;
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut buf = vec![0u8; 64 * 1024];
 
     let hash_value = match config.algorithm.as_str() {
         "sha256" => {
             let mut hasher = sha2::Sha256::new();
-            hasher.update(&data);
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
             hex::encode(hasher.finalize())
         }
         "sha512" => {
             let mut hasher = sha2::Sha512::new();
-            hasher.update(&data);
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
             hex::encode(hasher.finalize())
         }
         "md5" => {
             let mut hasher = md5::Md5::new();
-            hasher.update(&data);
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
             hex::encode(hasher.finalize())
         }
         _ => {

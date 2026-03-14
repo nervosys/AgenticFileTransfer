@@ -339,7 +339,7 @@ impl QuicTransportListener {
         .map_err(|e| AftError::Other(format!("QUIC server config: {}", e)))?;
 
         let transport_config = Arc::get_mut(&mut server_config.transport)
-            .expect("transport config");
+            .ok_or_else(|| AftError::Other("QUIC transport config not exclusively owned".into()))?;
         transport_config.max_concurrent_bidi_streams(100u32.into());
         transport_config.max_concurrent_uni_streams(0u32.into());
 
@@ -419,7 +419,7 @@ impl TransportConnector for QuicTransportConnector {
             .parse()
             .map_err(|e| AftError::Other(format!("Invalid address {}: {}", addr, e)))?;
 
-        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
+        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().map_err(|e| AftError::Other(format!("Invalid bind address: {}", e)))?)
             .map_err(|e| AftError::Other(format!("QUIC client endpoint: {}", e)))?;
         endpoint.set_default_client_config(client_config);
 

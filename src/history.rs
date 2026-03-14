@@ -1,7 +1,8 @@
-//! Transfer history logging (~/.aft/history.json).
+//! Transfer history logging (~/.aft/history.jsonl).
 //!
-//! Appends a structured record after each completed transfer so agents
-//! can query past operations and humans can audit transfer activity.
+//! Appends a structured JSON Lines record after each completed transfer
+//! so agents can query past operations and humans can audit transfer activity.
+//! Uses append-only JSON Lines format (one JSON object per line) for O(1) writes.
 
 use std::path::PathBuf;
 
@@ -26,7 +27,7 @@ pub struct HistoryEntry {
 
 /// Path to the history file.
 fn history_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".aft").join("history.json"))
+    dirs::home_dir().map(|h| h.join(".aft").join("history.jsonl"))
 }
 
 /// Append a transfer record to the history file.
@@ -61,25 +62,16 @@ pub fn log_transfer(
         error: error.map(|s| s.to_string()),
     };
 
-    // Append to existing history (read-modify-write)
-    let mut entries: Vec<HistoryEntry> = if path.exists() {
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    // Limit history to most recent 1000 entries
-    if entries.len() >= 1000 {
-        entries.drain(0..entries.len() - 999);
-    }
-
-    entries.push(entry);
-
-    if let Ok(json) = serde_json::to_string_pretty(&entries) {
-        let _ = std::fs::write(&path, json);
+    // Append-only JSON Lines: one JSON object per line, O(1) per write
+    if let Ok(json) = serde_json::to_string(&entry) {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(file, "{}", json);
+        }
     }
 }
 

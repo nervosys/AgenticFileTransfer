@@ -634,6 +634,7 @@ async fn handle_head<W: tokio::io::AsyncWrite + Unpin>(
     let payload = build_head_resp(metadata.len(), modified_secs, &content_type);
     write_frame(writer, &Frame::new(FRAME_HEAD_RESP, payload)).await?;
     writer.flush().await?;
+    audit::log_file_access(audit::AuditEventType::FileRead, "local", &path_str, 0);
     Ok(())
 }
 
@@ -810,6 +811,7 @@ async fn handle_list<W: tokio::io::AsyncWrite + Unpin>(
     let payload = build_list_resp(&entries);
     write_frame(writer, &Frame::new(FRAME_LIST_RESP, payload)).await?;
     writer.flush().await?;
+    audit::log_file_access(audit::AuditEventType::FileList, "local", &path_str, entries.len() as u64);
     Ok(())
 }
 
@@ -900,20 +902,42 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> AftResult<tokio_rustls:
 
     // Restrict to TLS 1.2+ and FIPS-compatible cipher suites
     let tls_versions = &[&rustls::version::TLS13, &rustls::version::TLS12];
-    let cipher_suites = vec![
-        // TLS 1.3 — AES-256-GCM, AES-128-GCM (FIPS-approved)
-        rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
-        rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
-        // TLS 1.2 — ECDHE + AES-GCM (FIPS-approved key exchange + cipher)
-        rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-        rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-        rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-        rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-    ];
 
-    let provider = rustls::crypto::CryptoProvider {
-        cipher_suites,
-        ..rustls::crypto::ring::default_provider()
+    #[cfg(feature = "fips")]
+    let provider = {
+        // Use AWS-LC (FIPS 140-3 validated) as the crypto backend
+        let crypto_provider = rustls::crypto::aws_lc_rs::default_provider();
+        let cipher_suites = crypto_provider
+            .cipher_suites
+            .iter()
+            .filter(|cs| {
+                let name = format!("{:?}", cs.suite());
+                name.contains("AES_256_GCM") || name.contains("AES_128_GCM")
+            })
+            .cloned()
+            .collect();
+        rustls::crypto::CryptoProvider {
+            cipher_suites,
+            ..crypto_provider
+        }
+    };
+
+    #[cfg(not(feature = "fips"))]
+    let provider = {
+        let cipher_suites = vec![
+            // TLS 1.3 — AES-256-GCM, AES-128-GCM (FIPS-approved)
+            rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
+            rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
+            // TLS 1.2 — ECDHE + AES-GCM (FIPS-approved key exchange + cipher)
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        ];
+        rustls::crypto::CryptoProvider {
+            cipher_suites,
+            ..rustls::crypto::ring::default_provider()
+        }
     };
 
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))

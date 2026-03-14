@@ -1,3 +1,9 @@
+//! Error types for the AFT library.
+//!
+//! Provides a unified error enum covering all protocol, I/O, and
+//! application-level failures, with automatic conversion from
+//! `std::io::Error` and `reqwest::Error`.
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]

@@ -33,9 +33,11 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
 - **Recursive directory copy** — `aft copy -r` for directory trees across protocols
 - **Bandwidth throttling** — `--rate-limit` to cap transfer speed in bytes/sec
 - **Configuration file** — Persistent settings via `~/.aft/config.toml`
-- **Transfer history** — Logged to `~/.aft/history.json` for auditing
+- **Transfer history** — Logged to `~/.aft/history.jsonl` (JSON Lines) for auditing
 - **Transport layers** — TCP (default), WebSocket, and QUIC transports for AFTP
-- **Plugin system** — Load custom protocol handlers from shared libraries
+- **Plugin system** — Load custom protocol handlers from shared libraries (SHA-256 signature verified)
+- **FIPS 140-3 mode** — `cargo build --features fips` switches TLS to aws-lc-rs FIPS-validated provider
+- **CI/CD** — GitHub Actions pipeline with test, clippy, fmt, and cargo-audit
 - **Multiplexed streams** — Concurrent transfers over a single AFTP connection
 - **Cross-platform** — Windows, macOS, and Linux
 - **8.3 MB binary** — LTO, stripped, single codegen unit, panic=abort
@@ -339,7 +341,7 @@ src/
 ├── output.rs            Structured + colorized output formatting
 ├── ontology.rs          Agentic JSON-LD ontology schema
 ├── config.rs            Configuration file (~/.aft/config.toml)
-├── history.rs           Transfer history logging (~/.aft/history.json)
+├── history.rs           Transfer history logging (~/.aft/history.jsonl, JSON Lines)
 ├── audit.rs             Security audit logging (~/.aft/audit.log, JSON Lines)
 ├── plugins.rs           Plugin system for custom protocol handlers
 ├── lib.rs               Library re-exports for testing
@@ -371,6 +373,8 @@ src/
 
 tests/
 └── integration_tests.rs   131 tests (protocols, security, crypto, neural, classification, DoD)
+.github/
+└── workflows/ci.yml       CI pipeline (test, clippy, fmt, cargo-audit)
 ```
 
 ### Protocol Abstraction
