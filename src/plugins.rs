@@ -125,6 +125,10 @@ impl PluginRegistry {
     }
 
     /// Load a single plugin from a shared library path.
+    ///
+    /// A corresponding `.sha256` signature file must exist alongside the plugin
+    /// (e.g., `myplugin.dll.sha256`) containing the hex-encoded SHA-256 hash of
+    /// the plugin binary. This prevents loading of tampered or unsigned plugins.
     pub fn load_plugin(&mut self, path: &Path) -> AftResult<PluginMetadata> {
         // Validate the path exists and is a file
         if !path.is_file() {
@@ -134,8 +138,54 @@ impl PluginRegistry {
             )));
         }
 
+        // ── Signature verification ──────────────────────────────────────
+        // Require a .sha256 sidecar file with the expected hex hash.
+        let sig_path = path.with_extension(format!(
+            "{}.sha256",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        ));
+
+        if !sig_path.is_file() {
+            return Err(AftError::PermissionDenied(format!(
+                "Plugin signature file not found: {:?}. \
+                 Create it with: sha256sum {:?} > {:?}",
+                sig_path,
+                path.file_name().unwrap_or_default(),
+                sig_path.file_name().unwrap_or_default(),
+            )));
+        }
+
+        let expected_hash = std::fs::read_to_string(&sig_path)
+            .map_err(|e| AftError::Other(format!("Cannot read signature file {:?}: {}", sig_path, e)))?
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+
+        if expected_hash.len() != 64 || !expected_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(AftError::Other(format!(
+                "Invalid SHA-256 hash in {:?}: expected 64 hex chars",
+                sig_path,
+            )));
+        }
+
+        let plugin_bytes = std::fs::read(path)
+            .map_err(|e| AftError::Other(format!("Cannot read plugin {:?}: {}", path, e)))?;
+
+        use sha2::Digest;
+        let actual_hash = hex::encode(sha2::Sha256::digest(&plugin_bytes));
+
+        if actual_hash != expected_hash {
+            return Err(AftError::PermissionDenied(format!(
+                "Plugin signature mismatch for {:?}: \
+                 expected {}, got {}. Plugin may have been tampered with.",
+                path, expected_hash, actual_hash,
+            )));
+        }
+
         // Safety: Loading shared libraries is inherently unsafe.
-        // We trust that plugins from ~/.aft/plugins/ are user-installed.
+        // At this point the plugin has passed SHA-256 signature verification.
         let library = unsafe {
             libloading::Library::new(path)
                 .map_err(|e| AftError::Other(format!("Cannot load plugin {:?}: {}", path, e)))?

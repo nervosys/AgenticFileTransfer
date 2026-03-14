@@ -2,6 +2,7 @@
 name = "aft"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 description = "Agentic File Transfer — An agentic-first, high-performance file transfer CLI for humans and AI agents"
 license = "MIT"
 authors = ["Nervosys"]
@@ -95,6 +96,14 @@ aes-gcm = "0.10"
 
 # Self-signed cert generation for QUIC dev mode
 rcgen = "0.13"
+
+# Optional: FIPS-validated crypto backend (replaces ring with aws-lc-rs)
+# Enable with: cargo build --features fips
+aws-lc-rs = { version = "1", optional = true }
+
+[features]
+default = []
+fips = ["aws-lc-rs"]
 
 [profile.release]
 opt-level = 3

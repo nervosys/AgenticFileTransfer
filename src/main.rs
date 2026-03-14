@@ -80,6 +80,19 @@ async fn main() {
         cli.insecure = true;
     }
 
+    if cli.insecure {
+        eprintln!("WARNING: TLS certificate verification is DISABLED (--insecure).");
+        eprintln!("WARNING: Connections are vulnerable to man-in-the-middle attacks.");
+        audit::log_audit_event(
+            &audit::AuditEvent::new(
+                audit::AuditEventType::InsecureMode,
+                audit::AuditSeverity::Warning,
+                "insecure_mode_enabled",
+            )
+            .with_details("TLS certificate verification disabled via --insecure flag"),
+        );
+    }
+
     let format = resolve_format(&cli);
 
     // Initialize plugin system
@@ -781,7 +794,11 @@ async fn cmd_crypto(action: &cli::CryptoAction) -> AftResult<OutputResult> {
                 seed: *seed,
                 ..Default::default()
             };
-            let cipher = crypto::neural::NeuralCipher::train(&config);
+            let cipher = tokio::task::spawn_blocking(move || {
+                crypto::neural::NeuralCipher::train(&config)
+            })
+            .await
+            .map_err(|e| error::AftError::Other(format!("Training task failed: {}", e)))?;
             let model_path = std::path::PathBuf::from(output);
             cipher
                 .save(&model_path)

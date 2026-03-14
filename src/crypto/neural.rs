@@ -393,6 +393,7 @@ impl NeuralCipher {
     }
 
     /// Decrypt a single 16-byte block.
+    #[allow(dead_code)]
     fn decrypt_block(&self, block: &[u8; BLOCK_SIZE]) -> [u8; BLOCK_SIZE] {
         let input: Vec<f32> = block.iter().map(|&b| b as f32 / 255.0).collect();
         let decoded = self.decoder.forward_inference(&input);
