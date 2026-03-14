@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+Cargo.lock
+*.pdb
+.env
+/test_data/
+/download
+test_download.txt
+test_readme.txt

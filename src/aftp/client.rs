@@ -1,0 +1,560 @@
+//! AFTP client: connects to an AFTP server and performs file operations.
+//!
+//! Each public method opens a fresh TCP connection, performs the HELLO
+//! handshake (1 RTT), executes the operation, and closes the connection.
+//! This is simple and correct; for parallel chunked downloads the engine
+//! spawns multiple calls to `download_range` which run concurrently.
+//!
+//! Supports plain `aftp://` and TLS-encrypted `aftps://` connections.
+
+use std::io::Cursor;
+use std::path::Path;
+use std::sync::Arc;
+
+use colored::*;
+use sha2::Digest;
+use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
+use tokio::net::TcpStream;
+
+use crate::error::{AftError, AftResult};
+
+use super::frame::*;
+
+const BUF_SIZE: usize = DEFAULT_MAX_FRAME as usize + 1024;
+
+// Boxed async I/O types for TLS/plain abstraction
+type BoxRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
+// ── Public types ────────────────────────────────────────────────────────────
+
+pub struct AftpFileInfo {
+    pub size: u64,
+    pub modified_secs: u64,
+    pub content_type: String,
+}
+
+pub struct AftpDirEntry {
+    pub name: String,
+    pub size: u64,
+    pub is_dir: bool,
+    pub modified_secs: u64,
+}
+
+pub struct AftpClient {
+    host: String,
+    port: u16,
+    auth_token: Option<String>,
+    use_tls: bool,
+    insecure: bool,
+    use_challenge_auth: bool,
+}
+
+// ── URL parsing ─────────────────────────────────────────────────────────────
+
+/// Parse `aftp://host:port/path` or `aftps://host:port/path` → (host, port, path, use_tls).
+pub fn parse_aftp_url(url: &str) -> AftResult<(String, u16, String, bool)> {
+    let (rest, use_tls) = if let Some(r) = url.strip_prefix("aftps://") {
+        (r, true)
+    } else if let Some(r) = url.strip_prefix("aftp://") {
+        (r, false)
+    } else {
+        return Err(AftError::InvalidUrl(
+            "Not an aftp:// or aftps:// URL".into(),
+        ));
+    };
+
+    let (host_port, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+
+    let (host, port) = if let Some(i) = host_port.rfind(':') {
+        (
+            host_port[..i].to_string(),
+            host_port[i + 1..]
+                .parse::<u16>()
+                .map_err(|_| AftError::InvalidUrl("Invalid port in AFTP URL".into()))?,
+        )
+    } else {
+        (host_port.to_string(), DEFAULT_PORT)
+    };
+
+    if host.is_empty() {
+        return Err(AftError::InvalidUrl("Empty host in AFTP URL".into()));
+    }
+
+    Ok((host, port, path.to_string(), use_tls))
+}
+
+// ── Client impl ─────────────────────────────────────────────────────────────
+
+impl AftpClient {
+    pub fn new(
+        host: String,
+        port: u16,
+        auth_token: Option<String>,
+        use_tls: bool,
+        insecure: bool,
+    ) -> Self {
+        Self {
+            host,
+            port,
+            auth_token,
+            use_tls,
+            insecure,
+            use_challenge_auth: false,
+        }
+    }
+
+    /// Enable HMAC-SHA256 challenge/response authentication.
+    #[allow(dead_code)]
+    pub fn with_challenge_auth(mut self, enable: bool) -> Self {
+        self.use_challenge_auth = enable;
+        self
+    }
+
+    /// Open connection and perform HELLO handshake.
+    /// Returns (reader, writer, negotiated_max_frame, use_compression).
+    async fn connect(&self) -> AftResult<(BufReader<BoxRead>, BufWriter<BoxWrite>, u32, bool)> {
+        let addr = format!("{}:{}", self.host, self.port);
+        let stream = TcpStream::connect(&addr)
+            .await
+            .map_err(|e| AftError::ConnectionFailed(format!("AFTP connect to {}: {}", addr, e)))?;
+        stream.set_nodelay(true).ok();
+
+        let (mut reader, mut writer) = if self.use_tls {
+            let config = make_client_tls_config(self.insecure)?;
+            let connector = tokio_rustls::TlsConnector::from(config);
+            let server_name = rustls::pki_types::ServerName::try_from(self.host.clone())
+                .map_err(|_| AftError::Other(format!("Invalid TLS server name: {}", self.host)))?;
+            let tls_stream = connector
+                .connect(server_name, stream)
+                .await
+                .map_err(|e| AftError::ConnectionFailed(format!("AFTP TLS handshake: {}", e)))?;
+            let (rd, wr) = tokio::io::split(tls_stream);
+            (
+                BufReader::with_capacity(BUF_SIZE, Box::new(rd) as BoxRead),
+                BufWriter::with_capacity(BUF_SIZE, Box::new(wr) as BoxWrite),
+            )
+        } else {
+            let (rd, wr) = stream.into_split();
+            (
+                BufReader::with_capacity(BUF_SIZE, Box::new(rd) as BoxRead),
+                BufWriter::with_capacity(BUF_SIZE, Box::new(wr) as BoxWrite),
+            )
+        };
+
+        // Send HELLO
+        let mut caps = CAP_COMPRESSION | CAP_CHECKSUM;
+        if self.use_challenge_auth {
+            caps |= CAP_AUTH_CHALLENGE;
+        }
+        let hello_payload = build_hello(caps, self.auth_token.as_deref());
+        write_frame(&mut writer, &Frame::new(FRAME_HELLO, hello_payload)).await?;
+        writer.flush().await?;
+
+        // Read next frame — could be HELLO_ACK or AUTH_CHALLENGE
+        let next = read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?;
+
+        let ack = if next.frame_type == FRAME_AUTH_CHALLENGE {
+            // Server wants challenge/response
+            let challenge = parse_auth_challenge(&next.payload)?;
+
+            let token = self.auth_token.as_deref().ok_or_else(|| {
+                AftError::PermissionDenied("Auth token required for challenge".into())
+            })?;
+
+            // Compute HMAC-SHA256(token, nonce)
+            use hmac::{Hmac, Mac};
+            type HmacSha256 = Hmac<sha2::Sha256>;
+            let mut mac = HmacSha256::new_from_slice(token.as_bytes()).expect("HMAC key length");
+            mac.update(&challenge.nonce);
+            let result = mac.finalize().into_bytes();
+
+            let resp_payload = build_auth_response(&result);
+            write_frame(&mut writer, &Frame::new(FRAME_AUTH_RESPONSE, resp_payload)).await?;
+            writer.flush().await?;
+
+            // Now expect HELLO_ACK
+            read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?
+        } else {
+            next
+        };
+
+        if ack.frame_type == FRAME_ERROR {
+            let e = parse_error(&ack.payload)?;
+            return Err(AftError::ConnectionFailed(format!(
+                "Server rejected HELLO: {}",
+                e.message
+            )));
+        }
+        if ack.frame_type != FRAME_HELLO_ACK {
+            return Err(AftError::Other(format!(
+                "Expected HELLO_ACK, got 0x{:02x}",
+                ack.frame_type
+            )));
+        }
+
+        let ack_data = parse_hello_ack(&ack.payload)?;
+        let use_compression = ack_data.capabilities & CAP_COMPRESSION != 0;
+
+        Ok((reader, writer, ack_data.max_frame_size, use_compression))
+    }
+
+    /// Read the next frame hoping for `expected`; surface ERROR frames as errors.
+    async fn expect_frame(
+        reader: &mut BufReader<BoxRead>,
+        expected: u8,
+        max_payload: u32,
+    ) -> AftResult<Frame> {
+        let frame = read_frame(reader, max_payload).await?;
+        if frame.frame_type == FRAME_ERROR {
+            let e = parse_error(&frame.payload)?;
+            return Err(AftError::Other(format!("Server error: {}", e.message)));
+        }
+        if frame.frame_type != expected {
+            return Err(AftError::Other(format!(
+                "Expected frame 0x{:02x}, got 0x{:02x}",
+                expected, frame.frame_type
+            )));
+        }
+        Ok(frame)
+    }
+
+    // ── HEAD ────────────────────────────────────────────────────────────────
+
+    pub async fn head(&self, path: &str) -> AftResult<AftpFileInfo> {
+        let (mut reader, mut writer, max_frame, _) = self.connect().await?;
+
+        let payload = build_head(path);
+        write_frame(&mut writer, &Frame::new(FRAME_HEAD, payload)).await?;
+        writer.flush().await?;
+
+        let resp = Self::expect_frame(&mut reader, FRAME_HEAD_RESP, max_frame + 1024).await?;
+        let meta = parse_head_resp(&resp.payload)?;
+
+        Ok(AftpFileInfo {
+            size: meta.file_size,
+            modified_secs: meta.modified_secs,
+            content_type: meta.content_type,
+        })
+    }
+
+    // ── DOWNLOAD (full file) ────────────────────────────────────────────────
+
+    pub async fn download(
+        &self,
+        path: &str,
+        dest: &Path,
+        progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    ) -> AftResult<u64> {
+        let (mut reader, mut writer, max_frame, _use_compress) = self.connect().await?;
+
+        // Send GET (full file)
+        let payload = build_get(path, 0, 0);
+        write_frame(&mut writer, &Frame::new(FRAME_GET, payload)).await?;
+        writer.flush().await?;
+
+        // Receive HEAD_RESP
+        let head = Self::expect_frame(&mut reader, FRAME_HEAD_RESP, max_frame + 1024).await?;
+        let meta = parse_head_resp(&head.payload)?;
+
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+        let mut file = tokio::fs::File::create(dest).await?;
+        let mut hasher = sha2::Sha256::new();
+        let mut received = 0u64;
+
+        // Receive DATA frames
+        loop {
+            let frame = read_frame(&mut reader, max_frame + 1024).await?;
+            match frame.frame_type {
+                FRAME_DATA => {
+                    let data = if frame.flags & FLAG_COMPRESSED != 0 {
+                        zstd::decode_all(Cursor::new(&frame.payload))
+                            .map_err(|e| AftError::Other(format!("zstd error: {}", e)))?
+                    } else {
+                        frame.payload
+                    };
+                    hasher.update(&data);
+                    tokio::io::AsyncWriteExt::write_all(&mut file, &data).await?;
+                    received += data.len() as u64;
+                    if let Some(cb) = &progress {
+                        cb(received, Some(meta.file_size));
+                    }
+                }
+                FRAME_DATA_END => {
+                    let end_data = parse_data_end(&frame.payload)?;
+                    // Verify
+                    if end_data.total_bytes != received {
+                        return Err(AftError::Other(format!(
+                            "Byte count mismatch: expected {}, got {}",
+                            end_data.total_bytes, received
+                        )));
+                    }
+                    if end_data.checksum_algo == CHECKSUM_SHA256 && !end_data.checksum.is_empty() {
+                        let hash = hasher.finalize();
+                        if hash.as_slice() != end_data.checksum.as_slice() {
+                            return Err(AftError::ChecksumMismatch {
+                                expected: hex::encode(&end_data.checksum),
+                                actual: hex::encode(hash),
+                            });
+                        }
+                    }
+                    break;
+                }
+                FRAME_ERROR => {
+                    let e = parse_error(&frame.payload)?;
+                    return Err(AftError::Other(format!("Server error: {}", e.message)));
+                }
+                _ => {
+                    return Err(AftError::Other(format!(
+                        "Unexpected frame 0x{:02x}",
+                        frame.frame_type
+                    )));
+                }
+            }
+        }
+
+        file.flush().await?;
+        Ok(received)
+    }
+
+    // ── DOWNLOAD RANGE ──────────────────────────────────────────────────────
+
+    pub async fn download_range(&self, path: &str, start: u64, end: u64) -> AftResult<Vec<u8>> {
+        let (mut reader, mut writer, max_frame, _) = self.connect().await?;
+
+        let payload = build_get(path, start, end);
+        write_frame(&mut writer, &Frame::new(FRAME_GET, payload)).await?;
+        writer.flush().await?;
+
+        // HEAD_RESP
+        let _head = Self::expect_frame(&mut reader, FRAME_HEAD_RESP, max_frame + 1024).await?;
+
+        let expected_len = (end - start + 1) as usize;
+        let mut result = Vec::with_capacity(expected_len);
+
+        loop {
+            let frame = read_frame(&mut reader, max_frame + 1024).await?;
+            match frame.frame_type {
+                FRAME_DATA => {
+                    let data = if frame.flags & FLAG_COMPRESSED != 0 {
+                        zstd::decode_all(Cursor::new(&frame.payload))
+                            .map_err(|e| AftError::Other(format!("zstd error: {}", e)))?
+                    } else {
+                        frame.payload
+                    };
+                    result.extend_from_slice(&data);
+                }
+                FRAME_DATA_END => break,
+                FRAME_ERROR => {
+                    let e = parse_error(&frame.payload)?;
+                    return Err(AftError::Other(format!("Server error: {}", e.message)));
+                }
+                _ => {
+                    return Err(AftError::Other(format!(
+                        "Unexpected frame 0x{:02x}",
+                        frame.frame_type
+                    )));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    // ── UPLOAD ──────────────────────────────────────────────────────────────
+
+    pub async fn upload(
+        &self,
+        source: &Path,
+        remote_path: &str,
+        progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    ) -> AftResult<u64> {
+        let file_meta = tokio::fs::metadata(source).await?;
+        let file_size = file_meta.len();
+
+        let (mut reader, mut writer, max_frame, use_compress) = self.connect().await?;
+
+        // Send PUT request
+        let payload = build_put(remote_path, file_size);
+        write_frame(&mut writer, &Frame::new(FRAME_PUT, payload)).await?;
+        writer.flush().await?;
+
+        // Wait for PUT_ACK (ready)
+        let ack = Self::expect_frame(&mut reader, FRAME_PUT_ACK, INITIAL_MAX_PAYLOAD).await?;
+        let ack_data = parse_put_ack(&ack.payload)?;
+        if ack_data.complete {
+            return Err(AftError::Other(
+                "Server sent complete-ACK before data transfer".into(),
+            ));
+        }
+
+        // Stream data
+        let mut file = tokio::fs::File::open(source).await?;
+        let frame_buf_size = max_frame as usize;
+        let mut buf = vec![0u8; frame_buf_size];
+        let mut hasher = sha2::Sha256::new();
+        let mut total_sent = 0u64;
+
+        loop {
+            let n = tokio::io::AsyncReadExt::read(&mut file, &mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+
+            if use_compress {
+                if let Ok(compressed) = zstd::encode_all(Cursor::new(&buf[..n]), 1) {
+                    if compressed.len() < n {
+                        write_frame(
+                            &mut writer,
+                            &Frame::with_flags(FRAME_DATA, FLAG_COMPRESSED, compressed),
+                        )
+                        .await?;
+                        total_sent += n as u64;
+                        if let Some(cb) = &progress {
+                            cb(total_sent, Some(file_size));
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            write_frame_header(&mut writer, FRAME_DATA, 0, n as u32).await?;
+            writer.write_all(&buf[..n]).await?;
+            total_sent += n as u64;
+            if let Some(cb) = &progress {
+                cb(total_sent, Some(file_size));
+            }
+        }
+
+        // DATA_END
+        let hash = hasher.finalize();
+        let end_payload = build_data_end(total_sent, CHECKSUM_SHA256, &hash);
+        write_frame(&mut writer, &Frame::new(FRAME_DATA_END, end_payload)).await?;
+        writer.flush().await?;
+
+        // Wait for final PUT_ACK (complete)
+        let final_ack = Self::expect_frame(&mut reader, FRAME_PUT_ACK, INITIAL_MAX_PAYLOAD).await?;
+        let final_ack_data = parse_put_ack(&final_ack.payload)?;
+        if !final_ack_data.complete {
+            return Err(AftError::Other(
+                "Server did not confirm PUT completion".into(),
+            ));
+        }
+
+        Ok(total_sent)
+    }
+
+    // ── LIST ────────────────────────────────────────────────────────────────
+
+    pub async fn list(&self, path: &str) -> AftResult<Vec<AftpDirEntry>> {
+        let (mut reader, mut writer, max_frame, _) = self.connect().await?;
+
+        let payload = build_list(path);
+        write_frame(&mut writer, &Frame::new(FRAME_LIST, payload)).await?;
+        writer.flush().await?;
+
+        let resp = Self::expect_frame(&mut reader, FRAME_LIST_RESP, max_frame + 65536).await?;
+        let entries = parse_list_resp(&resp.payload)?;
+
+        Ok(entries
+            .into_iter()
+            .map(|e| AftpDirEntry {
+                name: e.name,
+                size: e.size,
+                is_dir: e.is_dir,
+                modified_secs: e.modified_secs,
+            })
+            .collect())
+    }
+}
+
+// ── TLS helpers ─────────────────────────────────────────────────────────────
+
+fn make_client_tls_config(insecure: bool) -> AftResult<Arc<rustls::ClientConfig>> {
+    // Restrict to TLS 1.2+ and FIPS-compatible cipher suites
+    let tls_versions = &[&rustls::version::TLS13, &rustls::version::TLS12];
+    let cipher_suites = vec![
+        rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
+        rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
+        rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    ];
+
+    let provider = rustls::crypto::CryptoProvider {
+        cipher_suites,
+        ..rustls::crypto::ring::default_provider()
+    };
+    let provider = Arc::new(provider);
+
+    if insecure {
+        eprintln!(
+            "  {} TLS certificate verification DISABLED (--insecure). Do NOT use in production.",
+            "WARNING:".red().bold()
+        );
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(tls_versions)
+            .map_err(|e| AftError::Other(format!("TLS version config error: {}", e)))?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
+            .with_no_client_auth();
+        Ok(Arc::new(config))
+    } else {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(tls_versions)
+            .map_err(|e| AftError::Other(format!("TLS version config error: {}", e)))?
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        Ok(Arc::new(config))
+    }
+}
+
+/// Certificate verifier that accepts any server certificate (for `--insecure` mode).
+#[derive(Debug)]
+struct InsecureCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
