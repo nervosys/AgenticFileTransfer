@@ -1,0 +1,107 @@
+[package]
+name = "aft"
+version = "0.1.0"
+edition = "2021"
+description = "Agentic File Transfer — An agentic-first, high-performance file transfer CLI for humans and AI agents"
+license = "MIT"
+authors = ["Nervosys"]
+repository = "https://github.com/nervosys/AgenticFileTransfer"
+keywords = ["file-transfer", "cli", "agentic", "curl", "wget"]
+categories = ["command-line-utilities", "network-programming"]
+
+[[bin]]
+name = "aft"
+path = "src/main.rs"
+
+[lib]
+name = "aft"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+    "gzip",
+    "brotli",
+    "deflate",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+thiserror = "1"
+anyhow = "1"
+colored = "2"
+indicatif = "0.17"
+futures = "0.3"
+sha2 = "0.10"
+md5 = { package = "md-5", version = "0.10" }
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+zstd = "0.13"
+
+# FTP/FTPS support
+suppaftp = { version = "6", features = ["async-rustls"] }
+
+# SFTP/SCP support
+russh = "0.46"
+russh-sftp = "2"
+russh-keys = "0.46"
+
+# S3 support
+rust-s3 = { version = "0.35", default-features = false, features = [
+    "tokio-rustls-tls",
+] }
+
+# TLS for AFTP
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+
+# Username detection
+whoami = "1"
+
+# Config file
+toml = "0.8"
+dirs = "6"
+
+# HMAC for AFTP challenge/response auth
+hmac = "0.12"
+
+# WebSocket transport
+tokio-tungstenite = "0.24"
+
+# QUIC transport
+quinn = "0.11"
+
+# Plugin system
+libloading = "0.8"
+
+# Random nonce generation
+rand = "0.8"
+
+# URL encoding for cloud storage APIs
+urlencoding = "2"
+
+# Post-quantum key encapsulation (Kyber1024 — NIST FIPS 203)
+pqc_kyber = { version = "0.7", features = ["kyber1024"] }
+
+# AES-256-GCM authenticated encryption
+aes-gcm = "0.10"
+
+# Self-signed cert generation for QUIC dev mode
+rcgen = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,136 @@
+//! ProtocolHandler implementation for the AFTP (Agentic File Transfer Protocol).
+//!
+//! Thin adapter: maps the generic `ProtocolHandler` trait surface onto the
+//! concrete `AftpClient` in `crate::aftp::client`.
+//!
+//! Supports both `aftp://` (plain) and `aftps://` (TLS-encrypted) URLs.
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use async_trait::async_trait;
+
+use crate::aftp::client::{parse_aftp_url, AftpClient};
+use crate::error::AftResult;
+
+use super::{DirectoryEntry, ProtocolHandler, ProtocolOptions, ResourceMetadata};
+
+pub struct AftpHandler {
+    scheme: String,
+}
+
+impl AftpHandler {
+    pub fn new(scheme: String) -> Self {
+        Self { scheme }
+    }
+}
+
+fn make_client(url: &str, opts: &ProtocolOptions) -> AftResult<(AftpClient, String)> {
+    let (host, port, path, use_tls) = parse_aftp_url(url)?;
+    let client = AftpClient::new(
+        host,
+        port,
+        opts.bearer_token.clone(),
+        use_tls,
+        opts.insecure,
+    );
+    Ok((client, path))
+}
+
+#[async_trait]
+impl ProtocolHandler for AftpHandler {
+    fn scheme(&self) -> &str {
+        &self.scheme
+    }
+
+    fn name(&self) -> &str {
+        "AFTP (Agentic File Transfer Protocol)"
+    }
+
+    fn supports_ranges(&self) -> bool {
+        true
+    }
+
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    async fn head(&self, url: &str, opts: &ProtocolOptions) -> AftResult<ResourceMetadata> {
+        let (client, path) = make_client(url, opts)?;
+        let info = client.head(&path).await?;
+        Ok(ResourceMetadata {
+            content_length: Some(info.size),
+            content_type: Some(info.content_type),
+            last_modified: Some(format!("{}", info.modified_secs)),
+            etag: None,
+            accepts_ranges: true,
+            headers: HashMap::new(),
+        })
+    }
+
+    async fn download(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &ProtocolOptions,
+        resume_from: Option<u64>,
+        progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    ) -> AftResult<u64> {
+        let (client, path) = make_client(url, opts)?;
+        // Resume is handled by starting a range GET from resume_from offset
+        if let Some(offset) = resume_from {
+            // For resume, do a range download and append
+            let data = client.download_range(&path, offset, 0).await?;
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dest)
+                .await?;
+            file.write_all(&data).await?;
+            Ok(data.len() as u64)
+        } else {
+            let cb = progress.as_deref();
+            client.download(&path, dest, cb).await
+        }
+    }
+
+    async fn download_range(
+        &self,
+        url: &str,
+        start: u64,
+        end: u64,
+        opts: &ProtocolOptions,
+    ) -> AftResult<Vec<u8>> {
+        let (client, path) = make_client(url, opts)?;
+        client.download_range(&path, start, end).await
+    }
+
+    async fn upload(
+        &self,
+        source: &Path,
+        url: &str,
+        opts: &ProtocolOptions,
+        _content_type: Option<&str>,
+        _method: Option<&str>,
+        progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    ) -> AftResult<u64> {
+        let (client, path) = make_client(url, opts)?;
+        let cb = progress.as_deref();
+        client.upload(source, &path, cb).await
+    }
+
+    async fn list(&self, url: &str, opts: &ProtocolOptions) -> AftResult<Vec<DirectoryEntry>> {
+        let (client, path) = make_client(url, opts)?;
+        let entries = client.list(&path).await?;
+        Ok(entries
+            .into_iter()
+            .map(|e| DirectoryEntry {
+                name: e.name,
+                size: Some(e.size),
+                is_directory: e.is_dir,
+                last_modified: Some(format!("{}", e.modified_secs)),
+            })
+            .collect())
+    }
+}
