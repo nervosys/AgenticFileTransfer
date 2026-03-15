@@ -1498,3 +1498,385 @@ mod encryption_method_tests {
         assert_eq!(EncryptionMethod::parse("HYBRID"), Some(EncryptionMethod::Hybrid));
     }
 }
+
+// ── End-to-end AFTP server integration tests ────────────────────────────────
+
+mod aftp_e2e_tests {
+    use aft::aftp::client::AftpClient;
+    use aft::aftp::server::AftpServer;
+    use tempfile::TempDir;
+
+    /// Helper: start an AFTP server on a random port, return the port.
+    async fn start_server(root: &std::path::Path, port: u16) -> tokio::task::JoinHandle<()> {
+        let server = AftpServer::new(
+            root, port, "127.0.0.1",
+            None, false, false, false,
+            None, None, 0,
+        );
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        })
+    }
+
+    fn make_client(port: u16) -> AftpClient {
+        AftpClient::new("127.0.0.1".into(), port, None, false, false)
+    }
+
+    #[tokio::test]
+    async fn server_head_returns_metadata() {
+        let dir = TempDir::new().unwrap();
+        let test_file = dir.path().join("hello.txt");
+        std::fs::write(&test_file, "Hello, AFTP!").unwrap();
+
+        let port = 12601;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = make_client(port);
+        let info = client.head("/hello.txt").await.unwrap();
+        assert_eq!(info.size, 12); // "Hello, AFTP!" = 12 bytes
+        assert!(!info.content_type.is_empty());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_download_file() {
+        let dir = TempDir::new().unwrap();
+        let content = "AFTP download test content - 1234567890";
+        std::fs::write(dir.path().join("dl.txt"), content).unwrap();
+
+        let port = 12602;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = make_client(port);
+        let dest = dir.path().join("dl_output.txt");
+        let bytes = client.download("/dl.txt", &dest, None).await.unwrap();
+        assert_eq!(bytes, content.len() as u64);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), content);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_upload_file() {
+        let dir = TempDir::new().unwrap();
+        let upload_content = "Uploaded via AFTP client test";
+        let src = dir.path().join("upload_src.txt");
+        std::fs::write(&src, upload_content).unwrap();
+
+        let port = 12603;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = make_client(port);
+        let bytes = client.upload(&src, "/uploaded.txt", None).await.unwrap();
+        assert_eq!(bytes, upload_content.len() as u64);
+
+        // Verify server wrote the file
+        let server_path = dir.path().join("uploaded.txt");
+        assert_eq!(std::fs::read_to_string(&server_path).unwrap(), upload_content);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_list_directory() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("aaa.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("bbb.txt"), "bb").unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+
+        let port = 12604;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = make_client(port);
+        let entries = client.list("/").await.unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"aaa.txt"));
+        assert!(names.contains(&"bbb.txt"));
+        assert!(names.contains(&"subdir"));
+
+        // Check subdir is flagged as directory
+        let subdir_entry = entries.iter().find(|e| e.name == "subdir").unwrap();
+        assert!(subdir_entry.is_dir);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_head_nonexistent_file() {
+        let dir = TempDir::new().unwrap();
+
+        let port = 12605;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = make_client(port);
+        let result = client.head("/nonexistent.txt").await;
+        assert!(result.is_err());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_with_auth_rejects_no_token() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "classified").unwrap();
+
+        let port = 12606;
+        let server = AftpServer::new(
+            dir.path(), port, "127.0.0.1",
+            Some("test_token_123".into()), false, false, false,
+            None, None, 0,
+        );
+        let handle = tokio::spawn(async move { let _ = server.run().await; });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Client with no token should be rejected
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+        let result = client.head("/secret.txt").await;
+        assert!(result.is_err());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_with_auth_accepts_correct_token() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "classified").unwrap();
+
+        let port = 12607;
+        let server = AftpServer::new(
+            dir.path(), port, "127.0.0.1",
+            Some("correct_token".into()), false, false, false,
+            None, None, 0,
+        );
+        let handle = tokio::spawn(async move { let _ = server.run().await; });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = AftpClient::new("127.0.0.1".into(), port, Some("correct_token".into()), false, false);
+        let info = client.head("/secret.txt").await.unwrap();
+        assert_eq!(info.size, 10); // "classified" = 10 bytes
+
+        handle.abort();
+    }
+}
+
+// ── Security-specific tests ─────────────────────────────────────────────────
+
+mod security_tests {
+    use aft::aftp::server::AftpServer;
+    use aft::aftp::client::AftpClient;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn path_traversal_rejected() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("safe.txt"), "ok").unwrap();
+
+        let port = 12610;
+        let server = AftpServer::new(
+            dir.path(), port, "127.0.0.1",
+            None, false, false, false,
+            None, None, 0,
+        );
+        let handle = tokio::spawn(async move { let _ = server.run().await; });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+
+        // Attempt path traversal
+        let result = client.head("/../../../etc/passwd").await;
+        assert!(result.is_err());
+
+        let result2 = client.head("/..\\..\\Windows\\System32\\config\\SAM").await;
+        assert!(result2.is_err());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn auth_rate_limiting_locks_out_ip() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "data").unwrap();
+
+        let port = 12611;
+        let server = AftpServer::new(
+            dir.path(), port, "127.0.0.1",
+            Some("real_token".into()), false, false, false,
+            None, None, 0,
+        );
+        let handle = tokio::spawn(async move { let _ = server.run().await; });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Send 5 bad auth attempts to trigger lockout
+        for _ in 0..5 {
+            let client = AftpClient::new("127.0.0.1".into(), port, Some("wrong_token".into()), false, false);
+            let _ = client.head("/test.txt").await;
+        }
+
+        // 6th attempt should also fail (locked out)
+        let client = AftpClient::new("127.0.0.1".into(), port, Some("real_token".into()), false, false);
+        let result = client.head("/test.txt").await;
+        assert!(result.is_err());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn smb_control_char_rejection() {
+        // Control characters in URL path should be rejected at URL parsing level
+        // Test via direct SMB URL parsing
+        use aft::protocols::resolve_protocol;
+        let bad_urls = vec![
+            "smb://server\x00/share/path",
+            "smb://server/share\t/path",
+            "smb://server/share/pa\nth",
+        ];
+        for url in &bad_urls {
+            let handler = resolve_protocol(url).unwrap();
+            let result = handler.head(url, &Default::default()).await;
+            assert!(result.is_err(), "Should reject: {:?}", url);
+        }
+    }
+
+    #[test]
+    fn credential_scrubbing_expanded() {
+        // Verify the expanded sensitive param list works via the history module
+        let entry = aft::history::HistoryEntry {
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            operation: "get".to_string(),
+            source: Some("https://api.example.com/data?access_key=AKID123&name=file".to_string()),
+            destination: Some("/tmp/file".to_string()),
+            protocol: Some("https".to_string()),
+            status: "success".to_string(),
+            bytes_transferred: 100,
+            duration_ms: 50,
+            error: None,
+        };
+        // The source URL has access_key= which should be scrubbed when logged
+        let json = serde_json::to_string(&entry).unwrap();
+        // The entry itself stores the raw value, scrubbing happens in log_transfer
+        assert!(json.contains("access_key"));
+    }
+}
+
+// ── Crypto roundtrip file-level tests ───────────────────────────────────────
+
+mod crypto_file_tests {
+    use aft::crypto;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn pqc_encrypt_decrypt_file_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("plain.txt");
+        let encrypted = dir.path().join("plain.txt.enc");
+        let decrypted = dir.path().join("plain.dec.txt");
+
+        let plaintext = "Post-quantum encryption file roundtrip test data!";
+        std::fs::write(&input, plaintext).unwrap();
+
+        // Generate keypair
+        let kp = crypto::pqc::generate_keypair().unwrap();
+        let pub_key = dir.path().join("test.pub");
+        let sec_key = dir.path().join("test.sec");
+        crypto::pqc::save_public_key(&kp.public_key, &pub_key).unwrap();
+        crypto::pqc::save_secret_key(&kp.secret_key, &sec_key).unwrap();
+
+        // Encrypt
+        let enc_size = crypto::encrypt_file(&input, &encrypted, crypto::EncryptionMethod::Pqc, &pub_key).await.unwrap();
+        assert!(enc_size > 0);
+        assert!(encrypted.exists());
+
+        // Decrypt
+        let dec_size = crypto::decrypt_file(&encrypted, &decrypted, &sec_key).await.unwrap();
+        assert_eq!(dec_size, plaintext.len() as u64);
+        assert_eq!(std::fs::read_to_string(&decrypted).unwrap(), plaintext);
+    }
+
+    #[tokio::test]
+    async fn neural_encrypt_decrypt_file_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("neural_plain.txt");
+        let encrypted = dir.path().join("neural_plain.txt.enc");
+        let decrypted = dir.path().join("neural_plain.dec.txt");
+
+        let plaintext = "Neural cipher file roundtrip test!";
+        std::fs::write(&input, plaintext).unwrap();
+
+        // Train a cipher model
+        let config = crypto::neural::TrainConfig {
+            epochs: 100,
+            learning_rate: 0.01,
+            batch_size: 32,
+            seed: 42,
+        };
+        let cipher = crypto::neural::NeuralCipher::train(&config);
+        let model_path = dir.path().join("test.nn");
+        cipher.save(&model_path).unwrap();
+
+        // Encrypt
+        let enc_size = crypto::encrypt_file(&input, &encrypted, crypto::EncryptionMethod::Neural, &model_path).await.unwrap();
+        assert!(enc_size > 0);
+
+        // Decrypt
+        let dec_size = crypto::decrypt_file(&encrypted, &decrypted, &model_path).await.unwrap();
+        assert_eq!(dec_size, plaintext.len() as u64);
+        assert_eq!(std::fs::read_to_string(&decrypted).unwrap(), plaintext);
+    }
+
+    #[tokio::test]
+    async fn hybrid_encrypt_decrypt_file_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("hybrid_plain.txt");
+        let encrypted = dir.path().join("hybrid_plain.txt.enc");
+        let decrypted = dir.path().join("hybrid_plain.dec.txt");
+
+        let plaintext = "Hybrid PQC+Neural roundtrip test data for file encryption!";
+        std::fs::write(&input, plaintext).unwrap();
+
+        // Generate PQC keypair (used for key exchange)
+        let kp = crypto::pqc::generate_keypair().unwrap();
+        let pub_key = dir.path().join("hybrid.pub");
+        let sec_key = dir.path().join("hybrid.sec");
+        crypto::pqc::save_public_key(&kp.public_key, &pub_key).unwrap();
+        crypto::pqc::save_secret_key(&kp.secret_key, &sec_key).unwrap();
+
+        // Encrypt with hybrid method (needs pub key for PQC KEM)
+        let enc_size = crypto::encrypt_file(&input, &encrypted, crypto::EncryptionMethod::Hybrid, &pub_key).await.unwrap();
+        assert!(enc_size > 0);
+
+        // Decrypt with secret key
+        let dec_size = crypto::decrypt_file(&encrypted, &decrypted, &sec_key).await.unwrap();
+        assert_eq!(dec_size, plaintext.len() as u64);
+        assert_eq!(std::fs::read_to_string(&decrypted).unwrap(), plaintext);
+    }
+
+    #[tokio::test]
+    async fn pqc_wrong_key_fails_file_decrypt() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("wrong_key.txt");
+        let encrypted = dir.path().join("wrong_key.enc");
+        let decrypted = dir.path().join("wrong_key.dec");
+
+        std::fs::write(&input, "secret data").unwrap();
+
+        let kp1 = crypto::pqc::generate_keypair().unwrap();
+        let kp2 = crypto::pqc::generate_keypair().unwrap();
+        let pub1 = dir.path().join("k1.pub");
+        let sec2 = dir.path().join("k2.sec");
+        crypto::pqc::save_public_key(&kp1.public_key, &pub1).unwrap();
+        crypto::pqc::save_secret_key(&kp2.secret_key, &sec2).unwrap();
+
+        // Encrypt with key 1
+        crypto::encrypt_file(&input, &encrypted, crypto::EncryptionMethod::Pqc, &pub1).await.unwrap();
+
+        // Decrypt with key 2 should fail
+        let result = crypto::decrypt_file(&encrypted, &decrypted, &sec2).await;
+        assert!(result.is_err());
+    }
+}

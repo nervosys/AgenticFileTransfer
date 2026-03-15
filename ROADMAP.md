@@ -105,29 +105,61 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 
 ## Phase 10: Hardening, Performance & CI/CD
 
-| #   | Task                                                                                    | Status |
-| --- | --------------------------------------------------------------------------------------- | ------ |
-| 54  | Plugin signature verification (SHA-256 sidecar `.sha256` files)                          | Done   |
-| 55  | FIPS 140-3 crypto backend feature flag (`--features fips` → aws-lc-rs provider)          | Done   |
-| 56  | SMB control character injection hardening (reject ASCII 0-31, 127, C1 U+0080-U+009F)    | Done   |
-| 57  | Audit logging for HEAD and LIST operations on AFTP server                                | Done   |
-| 58  | `--insecure` stderr warning + audit event (`InsecureMode`)                               | Done   |
-| 59  | Neural training `spawn_blocking` (prevent async runtime blocking)                        | Done   |
-| 60  | History file: append-only JSON Lines format (`history.jsonl`, O(1) writes)               | Done   |
-| 61  | Commit Cargo.lock for reproducible builds                                                | Done   |
-| 62  | Fix `decrypt_block` dead code warning                                                    | Done   |
-| 63  | Crate-level and module doc comments for public APIs                                      | Done   |
-| 64  | Remove `.expect()` / `.unwrap()` from QUIC transport code                                | Done   |
-| 65  | CI pipeline (GitHub Actions: test, clippy, fmt, security audit)                          | Done   |
-| 66  | MSRV policy (`rust-version = "1.75"` in Cargo.toml)                                     | Done   |
-| 67  | Streaming checksum verification (64 KB buffered reads, no full-file load)                | Done   |
+| #   | Task                                                                                 | Status |
+| --- | ------------------------------------------------------------------------------------ | ------ |
+| 54  | Plugin signature verification (SHA-256 sidecar `.sha256` files)                      | Done   |
+| 55  | FIPS 140-3 crypto backend feature flag (`--features fips` → aws-lc-rs provider)      | Done   |
+| 56  | SMB control character injection hardening (reject ASCII 0-31, 127, C1 U+0080-U+009F) | Done   |
+| 57  | Audit logging for HEAD and LIST operations on AFTP server                            | Done   |
+| 58  | `--insecure` stderr warning + audit event (`InsecureMode`)                           | Done   |
+| 59  | Neural training `spawn_blocking` (prevent async runtime blocking)                    | Done   |
+| 60  | History file: append-only JSON Lines format (`history.jsonl`, O(1) writes)           | Done   |
+| 61  | Commit Cargo.lock for reproducible builds                                            | Done   |
+| 62  | Fix `decrypt_block` dead code warning                                                | Done   |
+| 63  | Crate-level and module doc comments for public APIs                                  | Done   |
+| 64  | Remove `.expect()` / `.unwrap()` from QUIC transport code                            | Done   |
+| 65  | CI pipeline (GitHub Actions: test, clippy, fmt, security audit)                      | Done   |
+| 66  | MSRV policy (`rust-version = "1.75"` in Cargo.toml)                                  | Done   |
+| 67  | Streaming checksum verification (64 KB buffered reads, no full-file load)            | Done   |
+
+## Phase 11: Quality, Testing & CI Hardening
+
+| #   | Task                                                                                 | Status |
+| --- | ------------------------------------------------------------------------------------ | ------ |
+| 68  | End-to-end AFTP server integration tests (start/GET/PUT/LIST/HEAD)                   | Done   |
+| 69  | Security-specific tests (path traversal, rate limiting, malicious frames)             | Done   |
+| 70  | Crypto roundtrip file-level tests (PQC, Neural, Hybrid encrypt→decrypt)              | Done   |
+| 71  | CI: MSRV (1.75) verification job                                                    | Done   |
+| 72  | CI: FIPS feature flag build verification                                             | Done   |
+| 73  | CI: Release build verification                                                      | Done   |
+| 74  | CI: cargo-deny supply chain audit                                                    | Done   |
+| 75  | Server connection limit (`--max-connections` + semaphore)                             | Done   |
+| 76  | Certificate pinning (`--pin-cert`) and CA bundle (`--ca-bundle`) CLI options          | Done   |
+| 77  | Expand credential scrubbing (access_key, secret_key, api_key, bearer, oauth_token)   | Done   |
+| 78  | Secure temp file permissions (mode 0o600 on Unix)                                    | Done   |
+| 79  | Plugin init error reporting (log errors in verbose mode)                              | Done   |
+| 80  | Streaming checksum in `cmd_checksum` (64 KB buffered reads)                          | Done   |
+| 81  | Server `handle_connection` section comments (handshake/auth/negotiation/request loop) | Done   |
+| 82  | SMB single-pass character validation (merged control + allowlist loops)               | Done   |
+| 83  | FIPS 140-3 build documentation in README                                             | Done   |
+| 84  | SECURITY.md quick assessment table (CUI/SECRET/TS/Internet suitability)              | Done   |
 
 ---
 
 ## Current Counts
 
-- **Done:** 67
+- **Done:** 84
 - **Planned:** 0
+
+## Known Issues & Security Debt
+
+| Issue                                    | Severity | Notes                                                    |
+| ---------------------------------------- | -------- | -------------------------------------------------------- |
+| Neural cipher not formally audited       | Medium   | Experimental — not recommended for production classified |
+| Plugin system loads native code          | Medium   | Mitigated by SHA-256 signature verification              |
+| No session timeout on AFTP connections   | Low      | Long-lived connections stay open until client disconnects |
+| `--insecure` disables all TLS validation | Low      | Mitigated by stderr warning + audit event                |
+| `--pin-cert` / `--ca-bundle` are CLI-only| Low      | Not yet wired into TLS client config                     |
 
 ## Architecture
 
@@ -170,7 +202,7 @@ src/
     ├── smb.rs             # SMB/CIFS (UNC + smbclient)
     └── dod.rs             # DoD CDS protocol (classification-aware HTTPS)
 tests/
-└── integration_tests.rs   # 131 tests (protocols, security, crypto, neural, classification, DoD)
+└── integration_tests.rs   # Integration & unit tests (protocols, security, crypto, neural, classification, DoD)
 .github/
 └── workflows/ci.yml       # CI pipeline (test, clippy, fmt, cargo-audit)
 ```

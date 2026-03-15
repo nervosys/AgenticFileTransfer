@@ -11,8 +11,8 @@
 pub mod aftp;
 pub mod audit;
 pub mod cli;
-pub mod crypto;
 pub mod config;
+pub mod crypto;
 pub mod engine;
 pub mod error;
 pub mod history;

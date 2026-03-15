@@ -63,7 +63,10 @@ impl AuthRateLimiter {
 
     /// Record a failed auth attempt for an IP.
     fn record_failure(&mut self, ip: std::net::IpAddr) {
-        let entry = self.failures.entry(ip).or_insert((0, std::time::Instant::now()));
+        let entry = self
+            .failures
+            .entry(ip)
+            .or_insert((0, std::time::Instant::now()));
         entry.0 += 1;
         entry.1 = std::time::Instant::now();
     }
@@ -85,6 +88,7 @@ pub struct AftpServer {
     verbose: bool,
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
+    max_connections: usize,
 }
 
 impl AftpServer {
@@ -98,6 +102,7 @@ impl AftpServer {
         verbose: bool,
         tls_cert_path: Option<String>,
         tls_key_path: Option<String>,
+        max_connections: usize,
     ) -> Self {
         Self {
             root: root.into(),
@@ -110,6 +115,7 @@ impl AftpServer {
             verbose,
             tls_cert_path,
             tls_key_path,
+            max_connections,
         }
     }
 
@@ -182,6 +188,15 @@ impl AftpServer {
             "MaxFrame:".cyan().bold(),
             format!("{} KB", self.max_frame_size / 1024).dimmed()
         );
+        eprintln!(
+            "  {} {}",
+            "MaxConns:".cyan().bold(),
+            if self.max_connections > 0 {
+                format!("{}", self.max_connections).dimmed()
+            } else {
+                "unlimited".dimmed()
+            }
+        );
         eprintln!();
         eprintln!(
             "  {} Accepting connections... (Ctrl+C to stop)",
@@ -201,13 +216,36 @@ impl AftpServer {
 
         let tls_acceptor = tls_acceptor.map(Arc::new);
 
+        // Connection limit semaphore
+        let conn_semaphore = if self.max_connections > 0 {
+            Some(Arc::new(tokio::sync::Semaphore::new(self.max_connections)))
+        } else {
+            None
+        };
+
         loop {
             tokio::select! {
                 accept = listener.accept() => {
                     let (stream, addr) = accept?;
                     let state = Arc::clone(&server);
                     let tls = tls_acceptor.clone();
+                    let sem = conn_semaphore.clone();
                     tokio::spawn(async move {
+                        // Acquire connection permit
+                        let _permit = if let Some(ref s) = sem {
+                            match s.try_acquire() {
+                                Ok(p) => Some(p),
+                                Err(_) => {
+                                    if state.verbose {
+                                        eprintln!("  {} {} rejected (max connections reached)", "x".red(), addr);
+                                    }
+                                    return;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
                         if state.verbose {
                             eprintln!("  {} {} connected", "->".blue(), addr);
                         }
@@ -320,7 +358,7 @@ where
     let mut reader = BufReader::with_capacity(READ_BUF, rd);
     let mut writer = BufWriter::with_capacity(WRITE_BUF, wr);
 
-    // ── Handshake ──
+    // ── Handshake ───────────────────────────────────────────────────────
     let hello = read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?;
     if hello.frame_type != FRAME_HELLO {
         send_error(&mut writer, ERR_INVALID_REQUEST, "Expected HELLO").await?;
@@ -329,17 +367,25 @@ where
 
     let hello_data = parse_hello(&hello.payload)?;
 
-    // ── Authentication ──
+    // ── Authentication ────────────────────────────────────────────────────
     if let Some(ref expected) = state.auth_token {
         // Check rate limiting before processing auth
         {
             let mut limiter = state.rate_limiter.lock().await;
             if limiter.is_locked_out(&addr.ip()) {
-                send_error(&mut writer, ERR_AUTH_FAILED,
-                    "Too many failed auth attempts. Try again later.").await?;
+                send_error(
+                    &mut writer,
+                    ERR_AUTH_FAILED,
+                    "Too many failed auth attempts. Try again later.",
+                )
+                .await?;
                 audit::log_auth_lockout(&addr.ip().to_string());
                 if state.verbose {
-                    eprintln!("  {} {} auth LOCKED OUT (rate limit)", "!".red().bold(), addr);
+                    eprintln!(
+                        "  {} {} auth LOCKED OUT (rate limit)",
+                        "!".red().bold(),
+                        addr
+                    );
                 }
                 return Err(AftError::PermissionDenied("Rate limited".into()));
             }
@@ -362,7 +408,10 @@ where
             if resp_frame.frame_type != FRAME_AUTH_RESPONSE {
                 let mut limiter = state.rate_limiter.lock().await;
                 limiter.record_failure(addr.ip());
-                audit::log_auth_failure(&addr.ip().to_string(), "invalid frame type during challenge");
+                audit::log_auth_failure(
+                    &addr.ip().to_string(),
+                    "invalid frame type during challenge",
+                );
                 send_error(&mut writer, ERR_AUTH_FAILED, "Expected AUTH_RESPONSE").await?;
                 if state.verbose {
                     eprintln!("  {} {} auth FAILED (bad frame type)", "!".yellow(), addr);
@@ -409,6 +458,7 @@ where
         audit::log_auth_success(&addr.ip().to_string());
     }
 
+    // ── Capability negotiation ──────────────────────────────────────────
     // Negotiate capabilities (intersection)
     let mut agreed_caps = hello_data.capabilities;
     if !state.compression {
@@ -429,7 +479,7 @@ where
 
     let max_payload = state.max_frame_size + 1024; // small margin for framing
 
-    // ── Request loop ──
+    // ── Request loop ────────────────────────────────────────────────────
     loop {
         let frame = match read_frame(&mut reader, max_payload).await {
             Ok(f) => f,
@@ -592,7 +642,12 @@ where
             total_sent
         );
     }
-    audit::log_file_access(audit::AuditEventType::FileRead, &addr.ip().to_string(), &req.path, total_sent);
+    audit::log_file_access(
+        audit::AuditEventType::FileRead,
+        &addr.ip().to_string(),
+        &req.path,
+        total_sent,
+    );
 
     Ok(())
 }
@@ -757,7 +812,12 @@ where
             total_received
         );
     }
-    audit::log_file_access(audit::AuditEventType::FileWrite, &addr.ip().to_string(), &req.path, total_received);
+    audit::log_file_access(
+        audit::AuditEventType::FileWrite,
+        &addr.ip().to_string(),
+        &req.path,
+        total_received,
+    );
 
     Ok(())
 }
@@ -811,7 +871,12 @@ async fn handle_list<W: tokio::io::AsyncWrite + Unpin>(
     let payload = build_list_resp(&entries);
     write_frame(writer, &Frame::new(FRAME_LIST_RESP, payload)).await?;
     writer.flush().await?;
-    audit::log_file_access(audit::AuditEventType::FileList, "local", &path_str, entries.len() as u64);
+    audit::log_file_access(
+        audit::AuditEventType::FileList,
+        "local",
+        &path_str,
+        entries.len() as u64,
+    );
     Ok(())
 }
 

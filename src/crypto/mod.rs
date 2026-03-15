@@ -86,15 +86,22 @@ pub async fn encrypt_file(
             (Vec::new(), ct)
         }
         EncryptionMethod::Hybrid => {
-            // PQC key exchange → shared secret used as XOR mask → neural encryption
+            // PQC key exchange → shared secret → deterministic neural cipher
             let (kem_ct, shared_secret) = pqc::encapsulate_key(key_file)?;
-            // XOR plaintext with repeated shared secret before neural encryption
+            // Derive a deterministic neural cipher from shared secret
+            let seed = u64::from_le_bytes(shared_secret[..8].try_into().unwrap());
+            let cipher = neural::NeuralCipher::train(&neural::TrainConfig {
+                epochs: 100,
+                seed,
+                ..Default::default()
+            });
+            // XOR plaintext with repeated shared secret, then neural-encrypt
             let masked: Vec<u8> = plaintext
                 .iter()
                 .enumerate()
                 .map(|(i, &b)| b ^ shared_secret[i % shared_secret.len()])
                 .collect();
-            let ct = neural::encrypt_file_data(&masked, key_file)?;
+            let ct = cipher.encrypt(&masked);
             (kem_ct, ct)
         }
     };
@@ -157,7 +164,14 @@ pub async fn decrypt_file(
         EncryptionMethod::Neural => neural::decrypt_file_data(ciphertext, key_file)?,
         EncryptionMethod::Hybrid => {
             let shared_secret = pqc::decapsulate_key(kem_ct, key_file)?;
-            let masked = neural::decrypt_file_data(ciphertext, key_file)?;
+            // Re-derive the same neural cipher from shared secret
+            let seed = u64::from_le_bytes(shared_secret[..8].try_into().unwrap());
+            let cipher = neural::NeuralCipher::train(&neural::TrainConfig {
+                epochs: 100,
+                seed,
+                ..Default::default()
+            });
+            let masked = cipher.decrypt(ciphertext);
             masked
                 .iter()
                 .enumerate()
