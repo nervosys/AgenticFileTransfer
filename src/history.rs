@@ -70,6 +70,12 @@ pub fn log_transfer(
             .append(true)
             .open(&path)
         {
+            // Restrict log permissions on Unix (owner-only read/write)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
             let _ = writeln!(file, "{}", json);
         }
     }
@@ -112,8 +118,22 @@ fn scrub_query_params(path_query: &str) -> String {
         let query = &path_query[q_pos + 1..];
 
         let sensitive = [
-            "token", "key", "secret", "password", "sig", "se", "sp", "spr", "sv", "ss",
-            "access_key", "secret_key", "api_key", "bearer", "oauth_token", "auth_code",
+            "token",
+            "key",
+            "secret",
+            "password",
+            "sig",
+            "se",
+            "sp",
+            "spr",
+            "sv",
+            "ss",
+            "access_key",
+            "secret_key",
+            "api_key",
+            "bearer",
+            "oauth_token",
+            "auth_code",
         ];
         let filtered: Vec<&str> = query
             .split('&')

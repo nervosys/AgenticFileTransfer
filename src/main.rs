@@ -18,6 +18,7 @@ use clap::Parser;
 use sha2::Digest;
 
 use cli::{ChecksumAlgorithm, Cli, Command, OutputFormat, PluginAction};
+use colored::Colorize;
 use error::AftResult;
 use output::{Format, OutputResult};
 
@@ -54,6 +55,12 @@ async fn main() {
 
     let mut cli = Cli::parse();
     let _config = config::load_config().unwrap_or_default();
+
+    // Validate loaded config values
+    if let Err(e) = _config.validate() {
+        eprintln!("{}: {}", "Config error".red().bold(), e);
+        std::process::exit(1);
+    }
 
     // Apply config defaults where CLI didn't override
     if cli.parallel == 4 {
@@ -285,6 +292,13 @@ fn build_opts(
 
     if let Some(ua) = user_agent {
         opts.user_agent = Some(ua.to_string());
+    }
+
+    if let Some(ref pin) = cli.pin_cert {
+        opts.pin_cert = Some(pin.clone());
+    }
+    if let Some(ref ca) = cli.ca_bundle {
+        opts.ca_bundle = Some(ca.clone());
     }
 
     opts
@@ -568,6 +582,15 @@ async fn cmd_copy(
         );
         let temp_file = std::env::temp_dir().join(temp_name);
 
+        // Scope guard ensures temp file is cleaned up even on panic
+        struct TempFileGuard(std::path::PathBuf);
+        impl Drop for TempFileGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _temp_guard = TempFileGuard(temp_file.clone());
+
         // Restrict temp file permissions (owner-only read/write)
         #[cfg(unix)]
         {
@@ -584,7 +607,6 @@ async fn cmd_copy(
         let dl_result =
             engine::download(&*src_handler, source, &temp_file, &opts, &config, None).await;
         if let Err(e) = dl_result {
-            let _ = tokio::fs::remove_file(&temp_file).await;
             return Ok(OutputResult::failure(
                 "Copy",
                 &format!("Download phase failed: {}", e),
@@ -602,7 +624,6 @@ async fn cmd_copy(
             None,
         )
         .await;
-        let _ = tokio::fs::remove_file(&temp_file).await;
 
         match ul_result {
             Ok(transfer) => {

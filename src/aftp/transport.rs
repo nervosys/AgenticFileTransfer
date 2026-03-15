@@ -1,3 +1,6 @@
+// Suppress dead-code warnings: these transport abstractions are public API
+// reserved for future multi-transport support (WebSocket, QUIC). The TCP
+// transport is actively used by AftpClient; WS and QUIC are scaffolded.
 #![allow(dead_code)]
 //! Transport abstraction for AFTP: TCP, WebSocket, and QUIC.
 //!

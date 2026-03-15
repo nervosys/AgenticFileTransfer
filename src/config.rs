@@ -86,3 +86,31 @@ pub fn ensure_aft_dir() -> AftResult<std::path::PathBuf> {
 
     Ok(dir)
 }
+
+impl AftConfig {
+    /// Validate configuration values are within sane bounds.
+    pub fn validate(&self) -> AftResult<()> {
+        if let Some(p) = self.parallel {
+            if p == 0 || p > 256 {
+                return Err(AftError::Other(
+                    "Config error: 'parallel' must be 1–256".into(),
+                ));
+            }
+        }
+        if let Some(t) = self.connect_timeout {
+            if t > 3600 {
+                return Err(AftError::Other(
+                    "Config error: 'connect_timeout' must be 0–3600".into(),
+                ));
+            }
+        }
+        if let Some(r) = self.retries {
+            if r > 100 {
+                return Err(AftError::Other(
+                    "Config error: 'retries' must be 0–100".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}

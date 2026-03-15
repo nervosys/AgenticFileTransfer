@@ -105,6 +105,12 @@ pub fn log_audit_event(event: &AuditEvent) {
             .append(true)
             .open(&path)
         {
+            // Restrict log permissions on Unix (owner-only read/write)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
             let _ = writeln!(file, "{}", json);
         }
     }

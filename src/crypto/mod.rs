@@ -89,7 +89,12 @@ pub async fn encrypt_file(
             // PQC key exchange → shared secret → deterministic neural cipher
             let (kem_ct, shared_secret) = pqc::encapsulate_key(key_file)?;
             // Derive a deterministic neural cipher from shared secret
-            let seed = u64::from_le_bytes(shared_secret[..8].try_into().unwrap());
+            let seed = u64::from_le_bytes(
+                shared_secret.get(..8)
+                    .ok_or_else(|| AftError::Other("Shared secret too short for seed derivation".into()))?
+                    .try_into()
+                    .map_err(|_| AftError::Other("Shared secret slice conversion failed".into()))?,
+            );
             let cipher = neural::NeuralCipher::train(&neural::TrainConfig {
                 epochs: 100,
                 seed,
@@ -124,15 +129,13 @@ pub async fn encrypt_file(
 /// Decrypt an AFT encrypted file.
 ///
 /// The encryption method is detected automatically from the file header.
-pub async fn decrypt_file(
-    input: &Path,
-    output: &Path,
-    key_file: &Path,
-) -> AftResult<u64> {
+pub async fn decrypt_file(input: &Path, output: &Path, key_file: &Path) -> AftResult<u64> {
     let data = tokio::fs::read(input).await?;
 
     if data.len() < HEADER_SIZE {
-        return Err(AftError::Other("File too short for encrypted header".into()));
+        return Err(AftError::Other(
+            "File too short for encrypted header".into(),
+        ));
     }
     if &data[..4] != ENCRYPTED_MAGIC {
         return Err(AftError::Other(
@@ -148,9 +151,18 @@ pub async fn decrypt_file(
 
     let method = EncryptionMethod::from_byte(data[5])
         .ok_or_else(|| AftError::Other(format!("Unknown encryption method: {}", data[5])))?;
-    // original_len at bytes 8..16 (informational)
-    let kem_ct_len =
-        u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
+    let original_len = u64::from_le_bytes([
+        data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
+    ]);
+    // Sanity-check: reject files claiming implausible original sizes (> 1 TiB)
+    const MAX_ORIGINAL_SIZE: u64 = 1 << 40;
+    if original_len > MAX_ORIGINAL_SIZE {
+        return Err(AftError::Other(format!(
+            "Encrypted file claims original size {} bytes, exceeding limit",
+            original_len
+        )));
+    }
+    let kem_ct_len = u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
 
     let kem_ct_end = HEADER_SIZE + kem_ct_len;
     if data.len() < kem_ct_end {
@@ -165,7 +177,12 @@ pub async fn decrypt_file(
         EncryptionMethod::Hybrid => {
             let shared_secret = pqc::decapsulate_key(kem_ct, key_file)?;
             // Re-derive the same neural cipher from shared secret
-            let seed = u64::from_le_bytes(shared_secret[..8].try_into().unwrap());
+            let seed = u64::from_le_bytes(
+                shared_secret.get(..8)
+                    .ok_or_else(|| AftError::Other("Shared secret too short for seed derivation".into()))?
+                    .try_into()
+                    .map_err(|_| AftError::Other("Shared secret slice conversion failed".into()))?,
+            );
             let cipher = neural::NeuralCipher::train(&neural::TrainConfig {
                 epochs: 100,
                 seed,

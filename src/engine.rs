@@ -265,6 +265,10 @@ async fn retry_download(
     }))
 }
 
+/// Maximum download size to pre-allocate (100 GiB). Prevents disk-exhaustion DoS
+/// when a malicious server claims an implausibly large content-length.
+const MAX_DOWNLOAD_SIZE: u64 = 100 * 1024 * 1024 * 1024;
+
 /// Parallel chunked download for large files with range support.
 ///
 /// Splits the file into chunks and downloads them concurrently, writing
@@ -279,6 +283,13 @@ async fn chunked_download(
     total_size: u64,
     progress_cb: Option<Arc<dyn Fn(u64, Option<u64>) + Send + Sync>>,
 ) -> AftResult<u64> {
+    if total_size > MAX_DOWNLOAD_SIZE {
+        return Err(AftError::TransferFailed(format!(
+            "File size {} bytes exceeds maximum download size of {} bytes",
+            total_size, MAX_DOWNLOAD_SIZE
+        )));
+    }
+
     let num_chunks = ((total_size + config.chunk_size - 1) / config.chunk_size) as usize;
     let chunks: Vec<(u64, u64)> = (0..num_chunks)
         .map(|i| {

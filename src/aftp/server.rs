@@ -33,6 +33,8 @@ const READ_BUF: usize = 65_536;
 const AUTH_MAX_FAILURES: u32 = 5;
 /// Duration (seconds) an IP is locked out after exceeding max failures.
 const AUTH_LOCKOUT_SECS: u64 = 60;
+/// Idle connection timeout in seconds.
+const CONNECTION_IDLE_TIMEOUT_SECS: u64 = 300;
 
 /// Per-IP rate limiter for authentication attempts.
 struct AuthRateLimiter {
@@ -69,6 +71,17 @@ impl AuthRateLimiter {
             .or_insert((0, std::time::Instant::now()));
         entry.0 += 1;
         entry.1 = std::time::Instant::now();
+
+        // Periodically purge expired entries to prevent unbounded growth
+        if self.failures.len() > 1000 {
+            self.cleanup_expired();
+        }
+    }
+
+    /// Remove entries whose lockout has long expired (2x lockout window).
+    fn cleanup_expired(&mut self) {
+        self.failures
+            .retain(|_, (_, last_time)| last_time.elapsed().as_secs() < AUTH_LOCKOUT_SECS * 2);
     }
 
     /// Clear failures for an IP (on successful auth).
@@ -480,12 +493,26 @@ where
     let max_payload = state.max_frame_size + 1024; // small margin for framing
 
     // ── Request loop ────────────────────────────────────────────────────
+    let idle_timeout = std::time::Duration::from_secs(CONNECTION_IDLE_TIMEOUT_SECS);
     loop {
-        let frame = match read_frame(&mut reader, max_payload).await {
-            Ok(f) => f,
-            Err(AftError::ConnectionFailed(_)) => break, // clean disconnect
-            Err(e) => return Err(e),
-        };
+        let frame =
+            match tokio::time::timeout(idle_timeout, read_frame(&mut reader, max_payload)).await {
+                Ok(Ok(f)) => f,
+                Ok(Err(AftError::ConnectionFailed(_))) => break, // clean disconnect
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    // Idle timeout expired
+                    if state.verbose {
+                        eprintln!(
+                            "  {} {} idle timeout ({}s)",
+                            "!".yellow(),
+                            addr,
+                            CONNECTION_IDLE_TIMEOUT_SECS
+                        );
+                    }
+                    break;
+                }
+            };
 
         match frame.frame_type {
             FRAME_GET => {

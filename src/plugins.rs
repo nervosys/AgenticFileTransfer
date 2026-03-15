@@ -103,7 +103,7 @@ impl PluginRegistry {
 
         let ext = plugin_extension();
         let entries = std::fs::read_dir(dir)
-            .map_err(|e| AftError::Other(format!("Cannot read plugins dir {:?}: {}", dir, e)))?;
+            .map_err(|_| AftError::Other("Cannot read plugins directory".into()))?;
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -132,10 +132,7 @@ impl PluginRegistry {
     pub fn load_plugin(&mut self, path: &Path) -> AftResult<PluginMetadata> {
         // Validate the path exists and is a file
         if !path.is_file() {
-            return Err(AftError::FileNotFound(format!(
-                "Plugin file not found: {:?}",
-                path
-            )));
+            return Err(AftError::FileNotFound("Plugin file not found".into()));
         }
 
         // ── Signature verification ──────────────────────────────────────
