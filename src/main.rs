@@ -44,8 +44,10 @@ fn enable_utf8_console() {
     extern "system" {
         fn SetConsoleOutputCP(cp: c_uint) -> i32;
     }
-    unsafe {
-        SetConsoleOutputCP(65001);
+    // SAFETY: SetConsoleOutputCP is a well-defined Win32 API with no UB.
+    let ok = unsafe { SetConsoleOutputCP(65001) };
+    if ok == 0 {
+        eprintln!("Warning: failed to set console codepage to UTF-8");
     }
 }
 
@@ -58,7 +60,11 @@ async fn main() {
     let _config = match config::load_config() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("{}: {} (using defaults)", "Config warning".yellow().bold(), e);
+            eprintln!(
+                "{}: {} (using defaults)",
+                "Config warning".yellow().bold(),
+                e
+            );
             config::AftConfig::default()
         }
     };
@@ -1075,7 +1081,10 @@ async fn recursive_local_copy(
         if depth > MAX_COPY_DEPTH {
             return Ok(OutputResult::failure(
                 "Copy",
-                &format!("Maximum directory depth ({}) exceeded — possible symlink loop", MAX_COPY_DEPTH),
+                &format!(
+                    "Maximum directory depth ({}) exceeded — possible symlink loop",
+                    MAX_COPY_DEPTH
+                ),
             ));
         }
 

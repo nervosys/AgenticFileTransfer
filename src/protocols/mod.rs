@@ -118,7 +118,14 @@ pub trait ProtocolHandler: Send + Sync {
 pub fn resolve_protocol(url: &str) -> AftResult<Box<dyn ProtocolHandler>> {
     let scheme = if url.contains("://") {
         let s = url.split("://").next().unwrap_or("").to_lowercase();
-        // Validate scheme characters (RFC 3986: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ))
+        // RFC 3986: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+        // Must be non-empty and start with an ASCII letter.
+        if s.is_empty() || !s.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            return Err(AftError::InvalidUrl(format!(
+                "Missing or invalid URL scheme in '{}'",
+                url
+            )));
+        }
         if !s
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
@@ -138,10 +145,16 @@ pub fn resolve_protocol(url: &str) -> AftResult<Box<dyn ProtocolHandler>> {
         )));
     };
 
-    // Check plugins first
-    if let Ok(guard) = crate::plugins::global_registry().lock() {
-        if let Some(handler) = guard.create_handler(&scheme) {
-            return Ok(handler);
+    // Check plugins first (gracefully handle poisoned mutex)
+    match crate::plugins::global_registry().lock() {
+        Ok(guard) => {
+            if let Some(handler) = guard.create_handler(&scheme) {
+                return Ok(handler);
+            }
+        }
+        Err(_) => {
+            // Mutex poisoned — skip plugins but continue with built-in handlers
+            eprintln!("Warning: plugin registry unavailable (mutex poisoned)");
         }
     }
 

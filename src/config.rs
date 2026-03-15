@@ -64,6 +64,24 @@ pub fn load_config() -> AftResult<AftConfig> {
         return Ok(AftConfig::default());
     }
 
+    // Warn if config file is world-readable (may contain tokens/keys)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                eprintln!(
+                    "Warning: {} is accessible to other users (mode {:04o}). \
+                     Consider: chmod 600 {}",
+                    path.display(),
+                    mode & 0o777,
+                    path.display()
+                );
+            }
+        }
+    }
+
     let content = std::fs::read_to_string(&path)
         .map_err(|e| AftError::Other(format!("Failed to read config {}: {}", path.display(), e)))?;
 

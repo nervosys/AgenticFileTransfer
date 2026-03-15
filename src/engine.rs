@@ -109,7 +109,9 @@ pub async fn download(
         match chunked_download(handler, url, dest, opts, config, total, progress_cb.clone()).await {
             Ok(bytes) => bytes,
             Err(_) => {
-                // Fall back to single-stream
+                // Truncate the pre-allocated file before falling back to
+                // single-stream, otherwise leftover zero-padding corrupts it.
+                let _ = tokio::fs::File::create(dest).await;
                 retry_download(
                     handler,
                     url,
@@ -293,8 +295,8 @@ async fn chunked_download(
     let num_chunks = ((total_size + config.chunk_size - 1) / config.chunk_size) as usize;
     let chunks: Vec<(u64, u64)> = (0..num_chunks)
         .map(|i| {
-            let start = i as u64 * config.chunk_size;
-            let end = std::cmp::min(start + config.chunk_size - 1, total_size - 1);
+            let start = (i as u64).saturating_mul(config.chunk_size);
+            let end = std::cmp::min(start.saturating_add(config.chunk_size - 1), total_size - 1);
             (start, end)
         })
         .collect();
