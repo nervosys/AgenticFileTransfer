@@ -20,3 +20,4 @@ pub mod ontology;
 pub mod output;
 pub mod plugins;
 pub mod protocols;
+pub mod telemetry;

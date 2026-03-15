@@ -10,6 +10,7 @@ mod ontology;
 mod output;
 mod plugins;
 mod protocols;
+mod telemetry;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use clap::Parser;
 use sha2::Digest;
 
-use cli::{ChecksumAlgorithm, Cli, Command, OutputFormat, PluginAction};
+use cli::{ChecksumAlgorithm, Cli, Command, OutputFormat, PluginAction, TelemetryAction};
 use colored::Colorize;
 use error::AftResult;
 use output::{Format, OutputResult};
@@ -250,6 +251,7 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
         }
         Command::Plugin { action } => cmd_plugin(action).await,
         Command::Crypto { action } => cmd_crypto(action).await,
+        Command::Telemetry { action } => cmd_telemetry(action).await,
     }
 }
 
@@ -1033,4 +1035,173 @@ async fn recursive_local_copy(
         chunks_used: file_count as usize,
     });
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry command
+// ---------------------------------------------------------------------------
+
+async fn cmd_telemetry(action: &TelemetryAction) -> AftResult<OutputResult> {
+    use telemetry::{format_telemetry_info, TelemetryConfig, TelemetryStore};
+
+    match action {
+        TelemetryAction::Status => {
+            let config = TelemetryConfig::load()?;
+            let store = TelemetryStore::new()?;
+            let count = store.count_records().unwrap_or(0);
+
+            let info = format_telemetry_info(&config);
+            println!("{}", info);
+            println!("Local records: {}", count);
+
+            let mut out = OutputResult::success("Telemetry Status");
+            out.source = Some(format!(
+                "enabled={}, remote={}, records={}",
+                config.enabled, config.remote_enabled, count
+            ));
+            Ok(out)
+        }
+
+        TelemetryAction::OptIn => {
+            let mut config = TelemetryConfig::load()?;
+            config.opt_in()?;
+
+            println!("{}", "Telemetry enabled.".green());
+            println!("Thank you for helping improve AFT!");
+
+            let mut out = OutputResult::success("Telemetry Opt-In");
+            out.source = Some("Telemetry is now enabled".to_string());
+            Ok(out)
+        }
+
+        TelemetryAction::OptOut => {
+            let mut config = TelemetryConfig::load()?;
+            config.opt_out()?;
+
+            println!("{}", "Telemetry disabled.".yellow());
+            println!("No data will be collected or sent.");
+
+            let mut out = OutputResult::success("Telemetry Opt-Out");
+            out.source = Some("Telemetry is now disabled".to_string());
+            Ok(out)
+        }
+
+        TelemetryAction::Reset => {
+            let mut config = TelemetryConfig::load()?;
+            let old_id = config.installation_id.clone();
+            config.reset_id()?;
+
+            println!("{}", "Installation ID reset.".green());
+            println!("Old ID: {}", old_id);
+            println!("New ID: {}", config.installation_id);
+
+            let mut out = OutputResult::success("Telemetry Reset");
+            out.source = Some(format!("New installation ID: {}", config.installation_id));
+            Ok(out)
+        }
+
+        TelemetryAction::Sync { limit } => {
+            let store = TelemetryStore::new()?;
+
+            if !store.config().is_remote_enabled() {
+                println!(
+                    "{}",
+                    "Remote telemetry is disabled. Use 'aft telemetry opt-in' to enable.".yellow()
+                );
+                return Ok(OutputResult::failure("Telemetry Sync", "Remote telemetry disabled"));
+            }
+
+            println!("Syncing telemetry data to {}...", store.config().remote_endpoint);
+
+            let result = store.sync_to_remote(*limit).await?;
+
+            if result.success {
+                println!(
+                    "{}",
+                    format!("Synced {} records successfully.", result.records_sent).green()
+                );
+                let mut out = OutputResult::success("Telemetry Sync");
+                out.source = Some(format!("{} records synced", result.records_sent));
+                Ok(out)
+            } else {
+                let err_msg = result.error.unwrap_or_else(|| "Unknown error".to_string());
+                println!("{}", format!("Sync failed: {}", err_msg).red());
+                Ok(OutputResult::failure("Telemetry Sync", &err_msg))
+            }
+        }
+
+        TelemetryAction::Clear => {
+            let store = TelemetryStore::new()?;
+            let count = store.clear_records()?;
+
+            println!("{}", format!("Cleared {} telemetry records.", count).green());
+
+            let mut out = OutputResult::success("Telemetry Clear");
+            out.source = Some(format!("{} records cleared", count));
+            Ok(out)
+        }
+
+        TelemetryAction::Export { output, format, limit } => {
+            let store = TelemetryStore::new()?;
+            let records = store.read_records(None, None, None, None, *limit)?;
+
+            if records.is_empty() {
+                println!("No telemetry records to export.");
+                return Ok(OutputResult::success("Telemetry Export"));
+            }
+
+            let content = match format.as_str() {
+                "jsonl" => {
+                    let lines: Vec<String> = records
+                        .iter()
+                        .map(|r| serde_json::to_string(r).unwrap_or_default())
+                        .collect();
+                    lines.join("\n")
+                }
+                _ => serde_json::to_string_pretty(&records)
+                    .map_err(|e| error::AftError::Other(format!("JSON error: {}", e)))?,
+            };
+
+            if let Some(path) = output {
+                std::fs::write(path, &content)?;
+                println!("{}", format!("Exported {} records to {}", records.len(), path).green());
+            } else {
+                println!("{}", content);
+            }
+
+            let mut out = OutputResult::success("Telemetry Export");
+            out.source = Some(format!("{} records exported", records.len()));
+            Ok(out)
+        }
+
+        TelemetryAction::Config { endpoint, api_key } => {
+            let mut config = TelemetryConfig::load()?;
+            let mut changed = false;
+
+            if let Some(ep) = endpoint {
+                config.set_endpoint(ep)?;
+                println!("Endpoint set to: {}", ep);
+                changed = true;
+            }
+
+            if let Some(key) = api_key {
+                config.set_api_key(Some(key.clone()))?;
+                println!("API key set.");
+                changed = true;
+            }
+
+            if !changed {
+                println!("Current endpoint: {}", config.remote_endpoint);
+                if config.remote_api_key.is_some() {
+                    println!("API key: (configured)");
+                } else {
+                    println!("API key: (not set)");
+                }
+            }
+
+            let mut out = OutputResult::success("Telemetry Config");
+            out.source = Some(format!("endpoint={}", config.remote_endpoint));
+            Ok(out)
+        }
+    }
 }

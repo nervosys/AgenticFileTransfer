@@ -165,9 +165,29 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 
 ---
 
+## Phase 13: Remote Telemetry
+
+| #   | Task                                                                        | Status |
+| --- | --------------------------------------------------------------------------- | ------ |
+| 97  | TelemetryConfig struct with opt-in default, installation ID, remote endpoint | Done   |
+| 98  | TelemetryRecord struct for structured event data (JSONL format)              | Done   |
+| 99  | TelemetryStore with local JSONL persistence (~/.aft/telemetry_records.jsonl) | Done   |
+| 100 | TelemetryCollector convenience wrapper for batching events                   | Done   |
+| 101 | TelemetryEvent enum (commands, transfers, errors, app started)              | Done   |
+| 102 | Remote sync to AWS EC2 endpoint (reqwest async POST /ingest)                | Done   |
+| 103 | CLI subcommand: `aft telemetry status`                                      | Done   |
+| 104 | CLI subcommand: `aft telemetry opt-in` / `opt-out`                          | Done   |
+| 105 | CLI subcommand: `aft telemetry reset` (regenerate installation ID)          | Done   |
+| 106 | CLI subcommand: `aft telemetry sync` (manual remote upload)                 | Done   |
+| 107 | CLI subcommand: `aft telemetry clear` / `export`                            | Done   |
+| 108 | CLI subcommand: `aft telemetry config` (endpoint/api-key setup)             | Done   |
+| 109 | Integration tests for telemetry config validation                           | Done   |
+
+---
+
 ## Current Counts
 
-- **Done:** 96
+- **Done:** 109
 - **Planned:** 0
 
 ## Known Issues & Security Debt
@@ -192,6 +212,7 @@ src/
 ├── config.rs              # Configuration file (~/.aft/config.toml)
 ├── history.rs             # Transfer history logging (~/.aft/history.jsonl, JSON Lines)
 ├── audit.rs               # Security audit logging (~/.aft/audit.log, JSON Lines)
+├── telemetry.rs           # Remote telemetry (AWS EC2, opt-in default, JSONL)
 ├── lib.rs                 # Library re-exports for testing
 ├── plugins.rs             # Plugin system for custom protocol handlers
 ├── aftp/
