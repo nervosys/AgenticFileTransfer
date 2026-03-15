@@ -93,6 +93,14 @@ pub struct Cli {
     /// Maximum bandwidth in bytes per second (0 = unlimited)
     #[arg(long, default_value = "0", global = true)]
     pub rate_limit: u64,
+
+    /// Pin a TLS certificate by SHA-256 fingerprint (hex-encoded, for AFTPS connections)
+    #[arg(long, global = true)]
+    pub pin_cert: Option<String>,
+
+    /// Path to a custom CA certificate bundle (PEM file)
+    #[arg(long, global = true)]
+    pub ca_bundle: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -254,6 +262,10 @@ pub enum Command {
         /// Maximum bandwidth in bytes/sec (0 = unlimited)
         #[arg(long, default_value = "0")]
         rate_limit: u64,
+
+        /// Maximum number of concurrent connections (0 = unlimited)
+        #[arg(long, default_value = "1000")]
+        max_connections: usize,
 
         /// Transport layer: tcp, ws (WebSocket), or quic
         #[arg(long, default_value = "tcp")]

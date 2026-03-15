@@ -113,6 +113,7 @@ fn scrub_query_params(path_query: &str) -> String {
 
         let sensitive = [
             "token", "key", "secret", "password", "sig", "se", "sp", "spr", "sv", "ss",
+            "access_key", "secret_key", "api_key", "bearer", "oauth_token", "auth_code",
         ];
         let filtered: Vec<&str> = query
             .split('&')

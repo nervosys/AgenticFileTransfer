@@ -81,8 +81,8 @@ impl Activation {
 
 #[derive(Debug, Clone)]
 struct DenseLayer {
-    weights: Vec<f32>,  // row-major: [output_dim × input_dim]
-    biases: Vec<f32>,   // [output_dim]
+    weights: Vec<f32>, // row-major: [output_dim × input_dim]
+    biases: Vec<f32>,  // [output_dim]
     input_dim: usize,
     output_dim: usize,
     activation: Activation,
@@ -569,19 +569,13 @@ fn read_network(data: &[u8], pos: &mut usize) -> std::io::Result<Network> {
                 "Truncated layer header",
             ));
         }
-        let input_dim = u32::from_le_bytes([
-            data[*pos],
-            data[*pos + 1],
-            data[*pos + 2],
-            data[*pos + 3],
-        ]) as usize;
+        let input_dim =
+            u32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+                as usize;
         *pos += 4;
-        let output_dim = u32::from_le_bytes([
-            data[*pos],
-            data[*pos + 1],
-            data[*pos + 2],
-            data[*pos + 3],
-        ]) as usize;
+        let output_dim =
+            u32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+                as usize;
         *pos += 4;
         let activation = Activation::from_byte(data[*pos]);
         *pos += 1;
@@ -597,24 +591,16 @@ fn read_network(data: &[u8], pos: &mut usize) -> std::io::Result<Network> {
 
         let mut weights = Vec::with_capacity(weight_count);
         for _ in 0..weight_count {
-            let val = f32::from_le_bytes([
-                data[*pos],
-                data[*pos + 1],
-                data[*pos + 2],
-                data[*pos + 3],
-            ]);
+            let val =
+                f32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
             weights.push(val);
             *pos += 4;
         }
 
         let mut biases = Vec::with_capacity(output_dim);
         for _ in 0..output_dim {
-            let val = f32::from_le_bytes([
-                data[*pos],
-                data[*pos + 1],
-                data[*pos + 2],
-                data[*pos + 3],
-            ]);
+            let val =
+                f32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
             biases.push(val);
             *pos += 4;
         }

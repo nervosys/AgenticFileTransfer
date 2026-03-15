@@ -62,7 +62,14 @@ fn validate_smb_component(component: &str, kind: &str) -> AftResult<()> {
     if component.is_empty() {
         return Err(AftError::InvalidUrl(format!("SMB {} is empty", kind)));
     }
-    // Reject any control characters (ASCII 0-31, 127, and C1 range 128-159)
+    // Prevent path traversal
+    if component == ".." || component == "." {
+        return Err(AftError::InvalidUrl(format!(
+            "SMB {} cannot be '.' or '..'",
+            kind
+        )));
+    }
+    // Single-pass: reject control characters and unsafe shell metacharacters
     for ch in component.chars() {
         if ch.is_control() || ('\u{0080}'..='\u{009F}').contains(&ch) {
             return Err(AftError::InvalidUrl(format!(
@@ -70,23 +77,12 @@ fn validate_smb_component(component: &str, kind: &str) -> AftResult<()> {
                 kind, ch as u32
             )));
         }
-    }
-    // Allow alphanumerics, dots, hyphens, underscores, and spaces
-    // Reject quotes, backticks, semicolons, pipes, and other shell metacharacters
-    for ch in component.chars() {
         if !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' | ' ') {
             return Err(AftError::InvalidUrl(format!(
                 "SMB {} contains unsafe character '{}'. Only alphanumerics, dots, hyphens, underscores, and spaces are allowed.",
                 kind, ch
             )));
         }
-    }
-    // Prevent path traversal
-    if component == ".." || component == "." {
-        return Err(AftError::InvalidUrl(format!(
-            "SMB {} cannot be '.' or '..'",
-            kind
-        )));
     }
     Ok(())
 }

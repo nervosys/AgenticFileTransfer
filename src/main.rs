@@ -96,7 +96,11 @@ async fn main() {
     let format = resolve_format(&cli);
 
     // Initialize plugin system
-    let _ = plugins::init_registry();
+    if let Err(e) = plugins::init_registry() {
+        if cli.verbose {
+            eprintln!("Warning: plugin registry init failed: {}", e);
+        }
+    }
 
     let result = run_command(&cli, format).await;
 
@@ -215,6 +219,7 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
             tls_cert,
             tls_key,
             rate_limit: _,
+            max_connections,
             transport,
         } => {
             let _transport_type: aftp::transport::TransportType = transport
@@ -231,6 +236,7 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
                 cli.verbose,
                 tls_cert.clone(),
                 tls_key.clone(),
+                *max_connections,
             );
             server.run().await?;
             Ok(OutputResult::success("serve"))
@@ -562,6 +568,19 @@ async fn cmd_copy(
         );
         let temp_file = std::env::temp_dir().join(temp_name);
 
+        // Restrict temp file permissions (owner-only read/write)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&temp_file)
+                .ok();
+        }
+
         let dl_result =
             engine::download(&*src_handler, source, &temp_file, &opts, &config, None).await;
         if let Err(e) = dl_result {
@@ -660,31 +679,55 @@ async fn cmd_checksum(
         ));
     }
 
-    let data = tokio::fs::read(file_path).await?;
+    // Stream the file in 64 KB chunks to avoid loading entire file into memory
+    let mut file = tokio::fs::File::open(file_path).await?;
+    let file_len = file.metadata().await?.len();
     let algo_name = algo_to_string(algorithm);
 
-    let hash = match algorithm {
-        ChecksumAlgorithm::Sha256 => {
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(&data);
-            hex::encode(hasher.finalize())
-        }
-        ChecksumAlgorithm::Sha512 => {
-            let mut hasher = sha2::Sha512::new();
-            hasher.update(&data);
-            hex::encode(hasher.finalize())
-        }
-        ChecksumAlgorithm::Md5 => {
-            let mut hasher = md5::Md5::new();
-            hasher.update(&data);
-            hex::encode(hasher.finalize())
+    let hash = {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 65_536];
+        match algorithm {
+            ChecksumAlgorithm::Sha256 => {
+                let mut hasher = sha2::Sha256::new();
+                loop {
+                    let n = file.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                hex::encode(hasher.finalize())
+            }
+            ChecksumAlgorithm::Sha512 => {
+                let mut hasher = sha2::Sha512::new();
+                loop {
+                    let n = file.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                hex::encode(hasher.finalize())
+            }
+            ChecksumAlgorithm::Md5 => {
+                let mut hasher = md5::Md5::new();
+                loop {
+                    let n = file.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                hex::encode(hasher.finalize())
+            }
         }
     };
 
     let mut out = OutputResult::success("Checksum");
     out.source = Some(path.to_string());
     out.transfer = Some(engine::TransferResult {
-        bytes_transferred: data.len() as u64,
+        bytes_transferred: file_len,
         duration_ms: 0,
         throughput_bytes_per_sec: 0.0,
         checksum: Some(engine::ChecksumResult {
@@ -794,11 +837,10 @@ async fn cmd_crypto(action: &cli::CryptoAction) -> AftResult<OutputResult> {
                 seed: *seed,
                 ..Default::default()
             };
-            let cipher = tokio::task::spawn_blocking(move || {
-                crypto::neural::NeuralCipher::train(&config)
-            })
-            .await
-            .map_err(|e| error::AftError::Other(format!("Training task failed: {}", e)))?;
+            let cipher =
+                tokio::task::spawn_blocking(move || crypto::neural::NeuralCipher::train(&config))
+                    .await
+                    .map_err(|e| error::AftError::Other(format!("Training task failed: {}", e)))?;
             let model_path = std::path::PathBuf::from(output);
             cipher
                 .save(&model_path)

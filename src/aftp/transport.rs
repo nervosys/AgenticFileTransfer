@@ -181,8 +181,12 @@ impl<S> WsReadAdapter<S> {
 
 impl<S> AsyncRead for WsReadAdapter<S>
 where
-    S: futures::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
-        + Unpin,
+    S: futures::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
 {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
@@ -240,8 +244,10 @@ impl<S> WsWriteAdapter<S> {
 
 impl<S> AsyncWrite for WsWriteAdapter<S>
 where
-    S: futures::Sink<tokio_tungstenite::tungstenite::Message, Error = tokio_tungstenite::tungstenite::Error>
-        + Unpin,
+    S: futures::Sink<
+            tokio_tungstenite::tungstenite::Message,
+            Error = tokio_tungstenite::tungstenite::Error,
+        > + Unpin,
 {
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,
@@ -329,8 +335,7 @@ impl QuicTransportListener {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
             .map_err(|e| AftError::Other(format!("QUIC cert gen: {}", e)))?;
         let cert_der = cert.cert.der().to_vec();
-        let key_der =
-            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
 
         let mut server_config = quinn::ServerConfig::with_single_cert(
             vec![rustls::pki_types::CertificateDer::from(cert_der.clone())],
@@ -419,8 +424,12 @@ impl TransportConnector for QuicTransportConnector {
             .parse()
             .map_err(|e| AftError::Other(format!("Invalid address {}: {}", addr, e)))?;
 
-        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().map_err(|e| AftError::Other(format!("Invalid bind address: {}", e)))?)
-            .map_err(|e| AftError::Other(format!("QUIC client endpoint: {}", e)))?;
+        let mut endpoint = quinn::Endpoint::client(
+            "0.0.0.0:0"
+                .parse()
+                .map_err(|e| AftError::Other(format!("Invalid bind address: {}", e)))?,
+        )
+        .map_err(|e| AftError::Other(format!("QUIC client endpoint: {}", e)))?;
         endpoint.set_default_client_config(client_config);
 
         let connection = endpoint

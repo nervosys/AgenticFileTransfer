@@ -7,6 +7,18 @@
 
 ---
 
+## Quick Assessment
+
+| Environment            | Suitability | Notes                                                     |
+| ---------------------- | ----------- | --------------------------------------------------------- |
+| **CUI / CMMC L2**     | ✅ Ready     | With `--features fips`, TLS 1.2+, auth, audit logging     |
+| **SECRET**             | ⚠️ Conditional | Requires FIPS build, cert pinning, network isolation      |
+| **TOP SECRET / SCI**   | ❌ Not certified | Needs formal STIG evaluation and ATO process              |
+| **Internet-facing**    | ✅ Ready     | Rate limiting, path traversal protection, TLS enforcement |
+| **Air-gapped / SCIF**  | ✅ Ready     | No external dependencies at runtime                       |
+
+---
+
 ## Executive Summary
 
 AFT is a Rust-based file transfer CLI with 10 protocol handlers and a custom binary wire

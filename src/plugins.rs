@@ -156,7 +156,9 @@ impl PluginRegistry {
         }
 
         let expected_hash = std::fs::read_to_string(&sig_path)
-            .map_err(|e| AftError::Other(format!("Cannot read signature file {:?}: {}", sig_path, e)))?
+            .map_err(|e| {
+                AftError::Other(format!("Cannot read signature file {:?}: {}", sig_path, e))
+            })?
             .split_whitespace()
             .next()
             .unwrap_or("")

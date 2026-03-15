@@ -153,17 +153,18 @@ aft ls aftps://server:2600/
 
 ### Server options
 
-| Flag               | Default   | Description                                |
-| ------------------ | --------- | ------------------------------------------ |
-| `--port`           | `2600`    | TCP port to listen on                      |
-| `--bind`           | `0.0.0.0` | Address to bind to                         |
-| `--auth-token`     |           | Pre-shared authentication token            |
-| `--auth-challenge` | `false`   | Use HMAC-SHA256 challenge/response auth    |
-| `--compression`    | `false`   | Enable zstd compression for data frames    |
-| `--tls-cert`       |           | TLS certificate PEM file (enables AFTPS)   |
-| `--tls-key`        |           | TLS private key PEM file                   |
-| `--transport`      | `tcp`     | Transport layer: `tcp`, `ws`, or `quic`    |
-| `--rate-limit`     | `0`       | Max bandwidth in bytes/sec (0 = unlimited) |
+| Flag                | Default   | Description                                |
+| ------------------- | --------- | ------------------------------------------ |
+| `--port`            | `2600`    | TCP port to listen on                      |
+| `--bind`            | `0.0.0.0` | Address to bind to                         |
+| `--auth-token`      |           | Pre-shared authentication token            |
+| `--auth-challenge`  | `false`   | Use HMAC-SHA256 challenge/response auth    |
+| `--compression`     | `false`   | Enable zstd compression for data frames    |
+| `--tls-cert`        |           | TLS certificate PEM file (enables AFTPS)   |
+| `--tls-key`         |           | TLS private key PEM file                   |
+| `--transport`       | `tcp`     | Transport layer: `tcp`, `ws`, or `quic`    |
+| `--rate-limit`      | `0`       | Max bandwidth in bytes/sec (0 = unlimited) |
+| `--max-connections` | `1000`    | Max concurrent connections (0 = unlimited) |
 
 ## Agent Mode
 
@@ -327,6 +328,8 @@ MITRE ATT&CK mitigations, NIST FIPS 140-3 compliance, and CMMC 2.0 Level 2 asses
 | `--timeout`         |       | `0`     | Transfer timeout, 0 = unlimited (seconds)  |
 | `--insecure`        |       | `false` | Skip TLS certificate verification          |
 | `--rate-limit`      |       | `0`     | Max bandwidth in bytes/sec (0 = unlimited) |
+| `--pin-cert`        |       |         | Pin TLS cert by SHA-256 fingerprint (hex)  |
+| `--ca-bundle`       |       |         | Custom CA certificate bundle (PEM file)    |
 | `--verbose`         | `-v`  | `false` | Verbose output                             |
 | `--quiet`           | `-q`  | `false` | Suppress non-error output                  |
 
@@ -414,6 +417,23 @@ pub trait ProtocolHandler: Send + Sync {
 - **1 MB AFTP frames** — 0.001% framing overhead at maximum frame size
 - **Connection pooling** — reqwest's built-in pool for HTTP
 - **Release profile** — LTO, single codegen unit, stripped, panic=abort (8.3 MB)
+
+## FIPS 140-3 Build
+
+For DoD and government environments requiring FIPS 140-3 validated cryptography,
+build with the `fips` feature flag to switch the TLS provider to
+[aws-lc-rs](https://github.com/aws/aws-lc-rs) (FIPS 140-3 validated):
+
+```bash
+cargo build --release --features fips
+```
+
+This replaces the default `ring` crypto backend with `aws-lc-rs` for all TLS
+operations, restricting cipher suites to FIPS-approved AES-256-GCM and AES-128-GCM
+with ECDHE key exchange.
+
+> **Note:** The `fips` feature requires a C/C++ toolchain (cmake, clang/gcc) for
+> building aws-lc-rs from source.
 
 ## License
 
