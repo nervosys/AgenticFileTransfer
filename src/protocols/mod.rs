@@ -46,6 +46,10 @@ pub struct ProtocolOptions {
     pub timeout_secs: u64,
     pub insecure: bool,
     pub max_redirects: usize,
+    /// SHA-256 fingerprint (hex) of a pinned TLS certificate
+    pub pin_cert: Option<String>,
+    /// Path to a custom CA certificate bundle (PEM file)
+    pub ca_bundle: Option<String>,
 }
 
 /// Trait defining the interface for all protocol handlers.
@@ -113,7 +117,18 @@ pub trait ProtocolHandler: Send + Sync {
 /// Checks loaded plugins first before falling back to built-in handlers.
 pub fn resolve_protocol(url: &str) -> AftResult<Box<dyn ProtocolHandler>> {
     let scheme = if url.contains("://") {
-        url.split("://").next().unwrap_or("").to_lowercase()
+        let s = url.split("://").next().unwrap_or("").to_lowercase();
+        // Validate scheme characters (RFC 3986: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ))
+        if !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        {
+            return Err(AftError::InvalidUrl(format!(
+                "Invalid characters in URL scheme: '{}'",
+                s
+            )));
+        }
+        s
     } else if is_local_path(url) {
         "file".to_string()
     } else {

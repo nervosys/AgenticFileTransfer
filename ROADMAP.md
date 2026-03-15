@@ -124,42 +124,60 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 
 ## Phase 11: Quality, Testing & CI Hardening
 
-| #   | Task                                                                                 | Status |
-| --- | ------------------------------------------------------------------------------------ | ------ |
-| 68  | End-to-end AFTP server integration tests (start/GET/PUT/LIST/HEAD)                   | Done   |
+| #   | Task                                                                                  | Status |
+| --- | ------------------------------------------------------------------------------------- | ------ |
+| 68  | End-to-end AFTP server integration tests (start/GET/PUT/LIST/HEAD)                    | Done   |
 | 69  | Security-specific tests (path traversal, rate limiting, malicious frames)             | Done   |
-| 70  | Crypto roundtrip file-level tests (PQC, Neural, Hybrid encrypt→decrypt)              | Done   |
-| 71  | CI: MSRV (1.75) verification job                                                    | Done   |
-| 72  | CI: FIPS feature flag build verification                                             | Done   |
-| 73  | CI: Release build verification                                                      | Done   |
-| 74  | CI: cargo-deny supply chain audit                                                    | Done   |
+| 70  | Crypto roundtrip file-level tests (PQC, Neural, Hybrid encrypt→decrypt)               | Done   |
+| 71  | CI: MSRV (1.75) verification job                                                      | Done   |
+| 72  | CI: FIPS feature flag build verification                                              | Done   |
+| 73  | CI: Release build verification                                                        | Done   |
+| 74  | CI: cargo-deny supply chain audit                                                     | Done   |
 | 75  | Server connection limit (`--max-connections` + semaphore)                             | Done   |
 | 76  | Certificate pinning (`--pin-cert`) and CA bundle (`--ca-bundle`) CLI options          | Done   |
-| 77  | Expand credential scrubbing (access_key, secret_key, api_key, bearer, oauth_token)   | Done   |
-| 78  | Secure temp file permissions (mode 0o600 on Unix)                                    | Done   |
+| 77  | Expand credential scrubbing (access_key, secret_key, api_key, bearer, oauth_token)    | Done   |
+| 78  | Secure temp file permissions (mode 0o600 on Unix)                                     | Done   |
 | 79  | Plugin init error reporting (log errors in verbose mode)                              | Done   |
-| 80  | Streaming checksum in `cmd_checksum` (64 KB buffered reads)                          | Done   |
+| 80  | Streaming checksum in `cmd_checksum` (64 KB buffered reads)                           | Done   |
 | 81  | Server `handle_connection` section comments (handshake/auth/negotiation/request loop) | Done   |
 | 82  | SMB single-pass character validation (merged control + allowlist loops)               | Done   |
-| 83  | FIPS 140-3 build documentation in README                                             | Done   |
-| 84  | SECURITY.md quick assessment table (CUI/SECRET/TS/Internet suitability)              | Done   |
+| 83  | FIPS 140-3 build documentation in README                                              | Done   |
+| 84  | SECURITY.md quick assessment table (CUI/SECRET/TS/Internet suitability)               | Done   |
+
+---
+
+## Phase 12: Hardening & Defense-in-Depth
+
+| #   | Task                                                                                 | Status |
+| --- | ------------------------------------------------------------------------------------ | ------ |
+| 85  | Hybrid crypto: replace `unwrap()` with safe error propagation on shared secret slice | Done   |
+| 86  | AFTP server: 5-minute idle connection timeout (`tokio::time::timeout`)               | Done   |
+| 87  | Wire `--pin-cert`/`--ca-bundle` into `ProtocolOptions` for downstream TLS use        | Done   |
+| 88  | Max download size guard (100 GiB) prevents disk-exhaustion DoS in chunked downloads  | Done   |
+| 89  | Config validation: reject `parallel=0`, `connect_timeout>3600`, `retries>100`        | Done   |
+| 90  | Decrypt: validate `original_len` header field (reject > 1 TiB)                       | Done   |
+| 91  | Temp file scope guard (RAII cleanup on panic) for cross-protocol copy                | Done   |
+| 92  | URL scheme character validation (RFC 3986 compliance)                                | Done   |
+| 93  | Rate limiter: automatic expiration cleanup when map exceeds 1000 entries             | Done   |
+| 94  | Audit & history log file permissions restricted to 0o600 on Unix                     | Done   |
+| 95  | Sanitize filesystem paths from plugin error messages (no path leaks)                 | Done   |
+| 96  | Document transport.rs dead-code rationale (public API for future multi-transport)    | Done   |
 
 ---
 
 ## Current Counts
 
-- **Done:** 84
+- **Done:** 96
 - **Planned:** 0
 
 ## Known Issues & Security Debt
 
-| Issue                                    | Severity | Notes                                                    |
-| ---------------------------------------- | -------- | -------------------------------------------------------- |
-| Neural cipher not formally audited       | Medium   | Experimental — not recommended for production classified |
-| Plugin system loads native code          | Medium   | Mitigated by SHA-256 signature verification              |
-| No session timeout on AFTP connections   | Low      | Long-lived connections stay open until client disconnects |
-| `--insecure` disables all TLS validation | Low      | Mitigated by stderr warning + audit event                |
-| `--pin-cert` / `--ca-bundle` are CLI-only| Low      | Not yet wired into TLS client config                     |
+| Issue                                    | Severity | Notes                                                            |
+| ---------------------------------------- | -------- | ---------------------------------------------------------------- |
+| Neural cipher not formally audited       | Medium   | Experimental — not recommended for production classified         |
+| Plugin system loads native code          | Medium   | Mitigated by SHA-256 signature verification                      |
+| `--insecure` disables all TLS validation | Low      | Mitigated by stderr warning + audit event                        |
+| `--pin-cert`/`--ca-bundle` in opts only  | Low      | Plumbed into ProtocolOptions; protocol handlers can now use them |
 
 ## Architecture
 

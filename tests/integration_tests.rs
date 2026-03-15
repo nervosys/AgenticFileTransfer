@@ -1399,25 +1399,49 @@ mod neural_tests {
 // ── Classification tests ────────────────────────────────────────────────────
 
 mod classification_tests {
-    use aft::crypto::classification::{Classification, validate_compliance};
+    use aft::crypto::classification::{validate_compliance, Classification};
 
     #[test]
     fn parse_classification_levels() {
-        assert_eq!(Classification::parse("UNCLASSIFIED"), Some(Classification::Unclassified));
+        assert_eq!(
+            Classification::parse("UNCLASSIFIED"),
+            Some(Classification::Unclassified)
+        );
         assert_eq!(Classification::parse("CUI"), Some(Classification::Cui));
-        assert_eq!(Classification::parse("SECRET"), Some(Classification::Secret));
-        assert_eq!(Classification::parse("TOP SECRET"), Some(Classification::TopSecret));
-        assert_eq!(Classification::parse("TOP-SECRET"), Some(Classification::TopSecret));
+        assert_eq!(
+            Classification::parse("SECRET"),
+            Some(Classification::Secret)
+        );
+        assert_eq!(
+            Classification::parse("TOP SECRET"),
+            Some(Classification::TopSecret)
+        );
+        assert_eq!(
+            Classification::parse("TOP-SECRET"),
+            Some(Classification::TopSecret)
+        );
         assert_eq!(Classification::parse("TS"), Some(Classification::TopSecret));
-        assert_eq!(Classification::parse("U"), Some(Classification::Unclassified));
+        assert_eq!(
+            Classification::parse("U"),
+            Some(Classification::Unclassified)
+        );
         assert_eq!(Classification::parse("invalid"), None);
     }
 
     #[test]
     fn case_insensitive_parsing() {
-        assert_eq!(Classification::parse("secret"), Some(Classification::Secret));
-        assert_eq!(Classification::parse("Secret"), Some(Classification::Secret));
-        assert_eq!(Classification::parse("SECRET"), Some(Classification::Secret));
+        assert_eq!(
+            Classification::parse("secret"),
+            Some(Classification::Secret)
+        );
+        assert_eq!(
+            Classification::parse("Secret"),
+            Some(Classification::Secret)
+        );
+        assert_eq!(
+            Classification::parse("SECRET"),
+            Some(Classification::Secret)
+        );
     }
 
     #[test]
@@ -1484,18 +1508,36 @@ mod encryption_method_tests {
     #[test]
     fn parse_encryption_methods() {
         assert_eq!(EncryptionMethod::parse("pqc"), Some(EncryptionMethod::Pqc));
-        assert_eq!(EncryptionMethod::parse("kyber"), Some(EncryptionMethod::Pqc));
-        assert_eq!(EncryptionMethod::parse("neural"), Some(EncryptionMethod::Neural));
-        assert_eq!(EncryptionMethod::parse("nn"), Some(EncryptionMethod::Neural));
-        assert_eq!(EncryptionMethod::parse("hybrid"), Some(EncryptionMethod::Hybrid));
+        assert_eq!(
+            EncryptionMethod::parse("kyber"),
+            Some(EncryptionMethod::Pqc)
+        );
+        assert_eq!(
+            EncryptionMethod::parse("neural"),
+            Some(EncryptionMethod::Neural)
+        );
+        assert_eq!(
+            EncryptionMethod::parse("nn"),
+            Some(EncryptionMethod::Neural)
+        );
+        assert_eq!(
+            EncryptionMethod::parse("hybrid"),
+            Some(EncryptionMethod::Hybrid)
+        );
         assert_eq!(EncryptionMethod::parse("invalid"), None);
     }
 
     #[test]
     fn parse_case_insensitive() {
         assert_eq!(EncryptionMethod::parse("PQC"), Some(EncryptionMethod::Pqc));
-        assert_eq!(EncryptionMethod::parse("Neural"), Some(EncryptionMethod::Neural));
-        assert_eq!(EncryptionMethod::parse("HYBRID"), Some(EncryptionMethod::Hybrid));
+        assert_eq!(
+            EncryptionMethod::parse("Neural"),
+            Some(EncryptionMethod::Neural)
+        );
+        assert_eq!(
+            EncryptionMethod::parse("HYBRID"),
+            Some(EncryptionMethod::Hybrid)
+        );
     }
 }
 
@@ -1509,9 +1551,16 @@ mod aftp_e2e_tests {
     /// Helper: start an AFTP server on a random port, return the port.
     async fn start_server(root: &std::path::Path, port: u16) -> tokio::task::JoinHandle<()> {
         let server = AftpServer::new(
-            root, port, "127.0.0.1",
-            None, false, false, false,
-            None, None, 0,
+            root,
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
         );
         tokio::spawn(async move {
             let _ = server.run().await;
@@ -1576,7 +1625,10 @@ mod aftp_e2e_tests {
 
         // Verify server wrote the file
         let server_path = dir.path().join("uploaded.txt");
-        assert_eq!(std::fs::read_to_string(&server_path).unwrap(), upload_content);
+        assert_eq!(
+            std::fs::read_to_string(&server_path).unwrap(),
+            upload_content
+        );
 
         handle.abort();
     }
@@ -1628,11 +1680,20 @@ mod aftp_e2e_tests {
 
         let port = 12606;
         let server = AftpServer::new(
-            dir.path(), port, "127.0.0.1",
-            Some("test_token_123".into()), false, false, false,
-            None, None, 0,
+            dir.path(),
+            port,
+            "127.0.0.1",
+            Some("test_token_123".into()),
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
         );
-        let handle = tokio::spawn(async move { let _ = server.run().await; });
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Client with no token should be rejected
@@ -1650,14 +1711,29 @@ mod aftp_e2e_tests {
 
         let port = 12607;
         let server = AftpServer::new(
-            dir.path(), port, "127.0.0.1",
-            Some("correct_token".into()), false, false, false,
-            None, None, 0,
+            dir.path(),
+            port,
+            "127.0.0.1",
+            Some("correct_token".into()),
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
         );
-        let handle = tokio::spawn(async move { let _ = server.run().await; });
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let client = AftpClient::new("127.0.0.1".into(), port, Some("correct_token".into()), false, false);
+        let client = AftpClient::new(
+            "127.0.0.1".into(),
+            port,
+            Some("correct_token".into()),
+            false,
+            false,
+        );
         let info = client.head("/secret.txt").await.unwrap();
         assert_eq!(info.size, 10); // "classified" = 10 bytes
 
@@ -1668,8 +1744,8 @@ mod aftp_e2e_tests {
 // ── Security-specific tests ─────────────────────────────────────────────────
 
 mod security_tests {
-    use aft::aftp::server::AftpServer;
     use aft::aftp::client::AftpClient;
+    use aft::aftp::server::AftpServer;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -1679,11 +1755,20 @@ mod security_tests {
 
         let port = 12610;
         let server = AftpServer::new(
-            dir.path(), port, "127.0.0.1",
-            None, false, false, false,
-            None, None, 0,
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
         );
-        let handle = tokio::spawn(async move { let _ = server.run().await; });
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
@@ -1705,21 +1790,42 @@ mod security_tests {
 
         let port = 12611;
         let server = AftpServer::new(
-            dir.path(), port, "127.0.0.1",
-            Some("real_token".into()), false, false, false,
-            None, None, 0,
+            dir.path(),
+            port,
+            "127.0.0.1",
+            Some("real_token".into()),
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
         );
-        let handle = tokio::spawn(async move { let _ = server.run().await; });
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Send 5 bad auth attempts to trigger lockout
         for _ in 0..5 {
-            let client = AftpClient::new("127.0.0.1".into(), port, Some("wrong_token".into()), false, false);
+            let client = AftpClient::new(
+                "127.0.0.1".into(),
+                port,
+                Some("wrong_token".into()),
+                false,
+                false,
+            );
             let _ = client.head("/test.txt").await;
         }
 
         // 6th attempt should also fail (locked out)
-        let client = AftpClient::new("127.0.0.1".into(), port, Some("real_token".into()), false, false);
+        let client = AftpClient::new(
+            "127.0.0.1".into(),
+            port,
+            Some("real_token".into()),
+            false,
+            false,
+        );
         let result = client.head("/test.txt").await;
         assert!(result.is_err());
 
@@ -1788,12 +1894,17 @@ mod crypto_file_tests {
         crypto::pqc::save_secret_key(&kp.secret_key, &sec_key).unwrap();
 
         // Encrypt
-        let enc_size = crypto::encrypt_file(&input, &encrypted, crypto::EncryptionMethod::Pqc, &pub_key).await.unwrap();
+        let enc_size =
+            crypto::encrypt_file(&input, &encrypted, crypto::EncryptionMethod::Pqc, &pub_key)
+                .await
+                .unwrap();
         assert!(enc_size > 0);
         assert!(encrypted.exists());
 
         // Decrypt
-        let dec_size = crypto::decrypt_file(&encrypted, &decrypted, &sec_key).await.unwrap();
+        let dec_size = crypto::decrypt_file(&encrypted, &decrypted, &sec_key)
+            .await
+            .unwrap();
         assert_eq!(dec_size, plaintext.len() as u64);
         assert_eq!(std::fs::read_to_string(&decrypted).unwrap(), plaintext);
     }
@@ -1820,11 +1931,20 @@ mod crypto_file_tests {
         cipher.save(&model_path).unwrap();
 
         // Encrypt
-        let enc_size = crypto::encrypt_file(&input, &encrypted, crypto::EncryptionMethod::Neural, &model_path).await.unwrap();
+        let enc_size = crypto::encrypt_file(
+            &input,
+            &encrypted,
+            crypto::EncryptionMethod::Neural,
+            &model_path,
+        )
+        .await
+        .unwrap();
         assert!(enc_size > 0);
 
         // Decrypt
-        let dec_size = crypto::decrypt_file(&encrypted, &decrypted, &model_path).await.unwrap();
+        let dec_size = crypto::decrypt_file(&encrypted, &decrypted, &model_path)
+            .await
+            .unwrap();
         assert_eq!(dec_size, plaintext.len() as u64);
         assert_eq!(std::fs::read_to_string(&decrypted).unwrap(), plaintext);
     }
@@ -1847,11 +1967,20 @@ mod crypto_file_tests {
         crypto::pqc::save_secret_key(&kp.secret_key, &sec_key).unwrap();
 
         // Encrypt with hybrid method (needs pub key for PQC KEM)
-        let enc_size = crypto::encrypt_file(&input, &encrypted, crypto::EncryptionMethod::Hybrid, &pub_key).await.unwrap();
+        let enc_size = crypto::encrypt_file(
+            &input,
+            &encrypted,
+            crypto::EncryptionMethod::Hybrid,
+            &pub_key,
+        )
+        .await
+        .unwrap();
         assert!(enc_size > 0);
 
         // Decrypt with secret key
-        let dec_size = crypto::decrypt_file(&encrypted, &decrypted, &sec_key).await.unwrap();
+        let dec_size = crypto::decrypt_file(&encrypted, &decrypted, &sec_key)
+            .await
+            .unwrap();
         assert_eq!(dec_size, plaintext.len() as u64);
         assert_eq!(std::fs::read_to_string(&decrypted).unwrap(), plaintext);
     }
@@ -1873,10 +2002,85 @@ mod crypto_file_tests {
         crypto::pqc::save_secret_key(&kp2.secret_key, &sec2).unwrap();
 
         // Encrypt with key 1
-        crypto::encrypt_file(&input, &encrypted, crypto::EncryptionMethod::Pqc, &pub1).await.unwrap();
+        crypto::encrypt_file(&input, &encrypted, crypto::EncryptionMethod::Pqc, &pub1)
+            .await
+            .unwrap();
 
         // Decrypt with key 2 should fail
         let result = crypto::decrypt_file(&encrypted, &decrypted, &sec2).await;
         assert!(result.is_err());
+    }
+}
+
+// ── Phase 12 hardening tests ────────────────────────────────────────────────
+
+mod hardening_tests {
+    use aft::config::AftConfig;
+    use aft::protocols::resolve_protocol;
+
+    #[test]
+    fn url_scheme_rejects_invalid_chars() {
+        // Null byte in scheme
+        let result = resolve_protocol("ht\x00tp://example.com/file");
+        assert!(result.is_err());
+        // Newline in scheme
+        let result = resolve_protocol("ht\ntp://example.com/file");
+        assert!(result.is_err());
+        // Space in scheme
+        let result = resolve_protocol("ht tp://example.com/file");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn url_scheme_accepts_valid_schemes() {
+        // Standard schemes should resolve (may error on unsupported, but not InvalidUrl)
+        let result = resolve_protocol("http://example.com/file");
+        assert!(result.is_ok());
+        let result = resolve_protocol("https://example.com/file");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn config_rejects_zero_parallel() {
+        let config = AftConfig {
+            parallel: Some(0),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn config_rejects_excessive_parallel() {
+        let config = AftConfig {
+            parallel: Some(999),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn config_rejects_excessive_retries() {
+        let config = AftConfig {
+            retries: Some(200),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn config_accepts_valid_values() {
+        let config = AftConfig {
+            parallel: Some(8),
+            retries: Some(5),
+            connect_timeout: Some(30),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn config_default_validates() {
+        let config = AftConfig::default();
+        assert!(config.validate().is_ok());
     }
 }
