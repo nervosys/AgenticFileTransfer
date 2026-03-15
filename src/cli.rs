@@ -283,6 +283,12 @@ pub enum Command {
         #[command(subcommand)]
         action: CryptoAction,
     },
+
+    /// Manage anonymous telemetry collection
+    Telemetry {
+        #[command(subcommand)]
+        action: TelemetryAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -361,5 +367,58 @@ pub enum CryptoAction {
         /// Key file (PQC .sec key or neural .nn model)
         #[arg(long, short = 'k')]
         key_file: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TelemetryAction {
+    /// Show telemetry status and what data is collected
+    Status,
+
+    /// Enable anonymous telemetry collection (default)
+    #[command(name = "opt-in")]
+    OptIn,
+
+    /// Disable anonymous telemetry collection
+    #[command(name = "opt-out")]
+    OptOut,
+
+    /// Generate a new anonymous installation ID
+    Reset,
+
+    /// Manually sync telemetry data to remote endpoint
+    Sync {
+        /// Maximum number of records to sync (default: all)
+        #[arg(long, short = 'n')]
+        limit: Option<usize>,
+    },
+
+    /// Clear local telemetry records
+    Clear,
+
+    /// Export telemetry records to a file
+    Export {
+        /// Output file path (defaults to stdout)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+
+        /// Export format: json, jsonl (default: json)
+        #[arg(long, short = 'f', default_value = "json")]
+        format: String,
+
+        /// Maximum number of records to export
+        #[arg(long, short = 'n')]
+        limit: Option<usize>,
+    },
+
+    /// Configure telemetry endpoint
+    Config {
+        /// Set the remote endpoint URL
+        #[arg(long)]
+        endpoint: Option<String>,
+
+        /// Set the API key for authenticated endpoints
+        #[arg(long)]
+        api_key: Option<String>,
     },
 }

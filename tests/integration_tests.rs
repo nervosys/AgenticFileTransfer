@@ -2084,3 +2084,53 @@ mod hardening_tests {
         assert!(config.validate().is_ok());
     }
 }
+
+mod telemetry_tests {
+    use aft::telemetry::TelemetryConfig;
+
+    #[test]
+    fn default_config_enabled() {
+        let config = TelemetryConfig::default();
+        assert!(config.enabled, "Telemetry should be enabled by default");
+        assert!(
+            config.remote_enabled,
+            "Remote telemetry should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn installation_id_is_uuid_format() {
+        let config = TelemetryConfig::default();
+        // UUID v4 format: 8-4-4-4-12 (36 chars with dashes)
+        assert_eq!(config.installation_id.len(), 36);
+        assert_eq!(config.installation_id.chars().nth(8), Some('-'));
+        assert_eq!(config.installation_id.chars().nth(13), Some('-'));
+        assert_eq!(config.installation_id.chars().nth(18), Some('-'));
+        assert_eq!(config.installation_id.chars().nth(23), Some('-'));
+    }
+
+    #[test]
+    fn installation_ids_are_unique() {
+        let config1 = TelemetryConfig::default();
+        let config2 = TelemetryConfig::default();
+        assert_ne!(
+            config1.installation_id, config2.installation_id,
+            "Each config should have a unique installation ID"
+        );
+    }
+
+    #[test]
+    fn default_endpoint_is_nervosys() {
+        let config = TelemetryConfig::default();
+        assert!(
+            config.remote_endpoint.contains("nervosys"),
+            "Default endpoint should be Nervosys AWS EC2 server"
+        );
+    }
+
+    #[test]
+    fn config_version_is_one() {
+        let config = TelemetryConfig::default();
+        assert_eq!(config.version, 1);
+    }
+}
