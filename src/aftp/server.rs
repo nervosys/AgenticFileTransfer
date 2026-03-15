@@ -37,6 +37,9 @@ const AUTH_LOCKOUT_SECS: u64 = 60;
 const CONNECTION_IDLE_TIMEOUT_SECS: u64 = 300;
 
 /// Per-IP rate limiter for authentication attempts.
+/// Bounded to MAX_TRACKED_IPS to prevent memory exhaustion under DoS.
+const MAX_TRACKED_IPS: usize = 10_000;
+
 struct AuthRateLimiter {
     /// Map of IP → (failure_count, last_failure_time)
     failures: HashMap<std::net::IpAddr, (u32, std::time::Instant)>,
@@ -72,8 +75,12 @@ impl AuthRateLimiter {
         entry.0 += 1;
         entry.1 = std::time::Instant::now();
 
-        // Periodically purge expired entries to prevent unbounded growth
-        if self.failures.len() > 1000 {
+        // Purge expired entries to prevent unbounded growth
+        if self.failures.len() > 100 {
+            self.cleanup_expired();
+        }
+        // Hard cap: if still above limit after cleanup, drop oldest entries
+        if self.failures.len() > MAX_TRACKED_IPS {
             self.cleanup_expired();
         }
     }
@@ -933,9 +940,10 @@ async fn send_err_from<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut BufWriter<W>,
     err: &AftError,
 ) -> AftResult<()> {
+    // Return only generic messages to clients — never leak internal paths.
     let (code, msg) = match err {
-        AftError::FileNotFound(m) => (ERR_NOT_FOUND, m.as_str()),
-        AftError::PermissionDenied(m) => (ERR_PERMISSION_DENIED, m.as_str()),
+        AftError::FileNotFound(_) => (ERR_NOT_FOUND, "Not found"),
+        AftError::PermissionDenied(_) => (ERR_PERMISSION_DENIED, "Access denied"),
         _ => (ERR_INTERNAL, "Internal server error"),
     };
     send_error(writer, code, msg).await

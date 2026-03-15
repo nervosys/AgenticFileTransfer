@@ -187,24 +187,40 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 
 ## Phase 14: Audit & Hardening
 
-| #   | Task                                                                         | Status |
-| --- | ---------------------------------------------------------------------------- | ------ |
-| 110 | Wire telemetry into command execution (track_command, track_transfer, track_error) | Done |
-| 111 | Fix ontology serialization unwrap() panics (graceful fallback)               | Done   |
-| 112 | Fix WebDAV PROPFIND unwrap() with documented expect()                        | Done   |
-| 113 | Add recursion depth limit (MAX_COPY_DEPTH = 100) to recursive copy           | Done   |
-| 114 | Add crypto and telemetry operation schemas to ontology                       | Done   |
-| 115 | Reject unsupported transports (ws/quic) in serve command                     | Done   |
-| 116 | Fix progress bar template unwrap() with documented expect()                  | Done   |
-| 117 | Warn on config file corruption instead of silent fallback                    | Done   |
-| 118 | Fix DoD hardcoded range/resume support (conservative false default)          | Done   |
-| 119 | Wire audit logging for server lifecycle (ServerStart, ServerStop)            | Done   |
+| #   | Task                                                                               | Status |
+| --- | ---------------------------------------------------------------------------------- | ------ |
+| 110 | Wire telemetry into command execution (track_command, track_transfer, track_error) | Done   |
+| 111 | Fix ontology serialization unwrap() panics (graceful fallback)                     | Done   |
+| 112 | Fix WebDAV PROPFIND unwrap() with documented expect()                              | Done   |
+| 113 | Add recursion depth limit (MAX_COPY_DEPTH = 100) to recursive copy                 | Done   |
+| 114 | Add crypto and telemetry operation schemas to ontology                             | Done   |
+| 115 | Reject unsupported transports (ws/quic) in serve command                           | Done   |
+| 116 | Fix progress bar template unwrap() with documented expect()                        | Done   |
+| 117 | Warn on config file corruption instead of silent fallback                          | Done   |
+| 118 | Fix DoD hardcoded range/resume support (conservative false default)                | Done   |
+| 119 | Wire audit logging for server lifecycle (ServerStart, ServerStop)                  | Done   |
+
+---
+
+## Phase 15: Security Hardening II
+
+| #   | Task                                                                               | Status |
+| --- | ---------------------------------------------------------------------------------- | ------ |
+| 120 | Fix empty URL scheme bypass (vacuous truth in RFC 3986 validation)                 | Done   |
+| 121 | Fix chunked download fallback file corruption (truncate before retry)              | Done   |
+| 122 | Fix chunk range integer overflow (saturating arithmetic)                            | Done   |
+| 123 | Handle plugin registry mutex poisoning gracefully                                   | Done   |
+| 124 | Check Windows SetConsoleOutputCP return code                                        | Done   |
+| 125 | Warn on world-readable config file permissions (Unix)                               | Done   |
+| 126 | Bound rate limiter HashMap (MAX_TRACKED_IPS = 10,000, aggressive cleanup)           | Done   |
+| 127 | Sanitize server error messages (generic responses to clients)                       | Done   |
+| 128 | Add neural model SHA-256 signature verification (.aftnn.sha256 sidecar)             | Done   |
 
 ---
 
 ## Current Counts
 
-- **Done:** 119
+- **Done:** 128
 - **Planned:** 0
 
 ## Known Issues & Security Debt
@@ -213,6 +229,7 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 | ---------------------------------------- | -------- | ---------------------------------------------------------------- |
 | Neural cipher not formally audited       | Medium   | Experimental — not recommended for production classified         |
 | Plugin system loads native code          | Medium   | Mitigated by SHA-256 signature verification                      |
+| Neural model file integrity              | Low      | Mitigated by optional .aftnn.sha256 sidecar verification         |
 | `--insecure` disables all TLS validation | Low      | Mitigated by stderr warning + audit event                        |
 | `--pin-cert`/`--ca-bundle` in opts only  | Low      | Plumbed into ProtocolOptions; protocol handlers can now use them |
 
