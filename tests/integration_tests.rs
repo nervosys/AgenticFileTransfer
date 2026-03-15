@@ -1495,8 +1495,9 @@ mod dod_protocol_tests {
     #[test]
     fn dod_supports_ranges() {
         let h = resolve_protocol("dod://UNCLASSIFIED@example.mil/test").unwrap();
-        assert!(h.supports_ranges());
-        assert!(h.supports_resume());
+        // DoD CDS gateway may not support HTTP ranges — conservative default
+        assert!(!h.supports_ranges());
+        assert!(!h.supports_resume());
     }
 }
 

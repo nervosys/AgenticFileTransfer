@@ -211,6 +211,29 @@ pub fn generate_schema() -> OntologySchema {
                 ],
                 returns: "Server status (runs until interrupted)".to_string(),
             },
+            OperationSchema {
+                name: "crypto".to_string(),
+                description: "Quantum-resistant cryptographic operations (Kyber1024 + AES-256-GCM, neural network cipher)".to_string(),
+                usage: "aft crypto <keygen|train|encrypt|decrypt> [options]".to_string(),
+                parameters: vec![
+                    ParameterSchema { name: "action".to_string(), type_: "enum(keygen, train, encrypt, decrypt)".to_string(), required: true, description: "Cryptographic action to perform".to_string(), default: None },
+                    ParameterSchema { name: "--input / -i".to_string(), type_: "string".to_string(), required: false, description: "Input file path".to_string(), default: None },
+                    ParameterSchema { name: "--output / -o".to_string(), type_: "string".to_string(), required: false, description: "Output file path".to_string(), default: None },
+                    ParameterSchema { name: "--public-key".to_string(), type_: "string".to_string(), required: false, description: "Path to public key file (PEM)".to_string(), default: None },
+                    ParameterSchema { name: "--secret-key".to_string(), type_: "string".to_string(), required: false, description: "Path to secret key file (PEM)".to_string(), default: None },
+                    ParameterSchema { name: "--cipher".to_string(), type_: "enum(kyber, neural)".to_string(), required: false, description: "Cipher to use".to_string(), default: Some("kyber".to_string()) },
+                ],
+                returns: "CryptoResult with operation, cipher, input_size, output_size".to_string(),
+            },
+            OperationSchema {
+                name: "telemetry".to_string(),
+                description: "Manage anonymous usage telemetry collection and reporting".to_string(),
+                usage: "aft telemetry <status|opt-in|opt-out|reset|sync|clear|export|config>".to_string(),
+                parameters: vec![
+                    ParameterSchema { name: "action".to_string(), type_: "enum(status, opt-in, opt-out, reset, sync, clear, export, config)".to_string(), required: true, description: "Telemetry management action".to_string(), default: None },
+                ],
+                returns: "Telemetry status or action confirmation".to_string(),
+            },
         ],
 
         protocols: vec![
@@ -307,7 +330,11 @@ pub fn print_schema(format: Format) {
     match format {
         Format::Json | Format::Text => {
             // Schema is always JSON for machine readability
-            println!("{}", serde_json::to_string_pretty(&schema).unwrap());
+            if let Ok(json) = serde_json::to_string_pretty(&schema) {
+                println!("{}", json);
+            } else {
+                eprintln!("Error: failed to serialize schema");
+            }
         }
         Format::Quiet => {}
     }
@@ -334,7 +361,11 @@ pub fn print_capabilities(format: Format) {
                 operations: schema.operations.iter().map(|o| o.name.clone()).collect(),
                 output_formats: schema.output_formats,
             };
-            println!("{}", serde_json::to_string_pretty(&caps).unwrap());
+            if let Ok(json) = serde_json::to_string_pretty(&caps) {
+                println!("{}", json);
+            } else {
+                eprintln!("Error: failed to serialize capabilities");
+            }
         }
         Format::Quiet => {}
         Format::Text => {

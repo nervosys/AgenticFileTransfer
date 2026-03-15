@@ -78,11 +78,13 @@ impl ProtocolHandler for DodHandler {
     }
 
     fn supports_ranges(&self) -> bool {
-        true
+        // Delegated from underlying HTTPS handler; actual support
+        // depends on the CDS gateway. Conservative default.
+        false
     }
 
     fn supports_resume(&self) -> bool {
-        true
+        false
     }
 
     async fn head(&self, url: &str, opts: &ProtocolOptions) -> AftResult<ResourceMetadata> {
