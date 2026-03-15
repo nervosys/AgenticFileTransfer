@@ -113,6 +113,12 @@ async fn main() {
         );
     }
 
+    // Validate CLI argument ranges (after config merging)
+    if let Err(e) = cli.validate() {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
+
     let format = resolve_format(&cli);
 
     // Initialize plugin system
@@ -473,7 +479,9 @@ async fn cmd_get(
     // Ensure parent directory exists
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent).await.ok();
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                eprintln!("Warning: failed to create directory {:?}: {}", parent, e);
+            }
         }
     }
 
@@ -636,7 +644,9 @@ async fn cmd_copy(
         };
         if let Some(parent) = dest_path.parent() {
             if !parent.as_os_str().is_empty() {
-                tokio::fs::create_dir_all(parent).await.ok();
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                    eprintln!("Warning: failed to create directory {:?}: {}", parent, e);
+                }
             }
         }
 
@@ -1088,7 +1098,9 @@ async fn recursive_local_copy(
             ));
         }
 
-        tokio::fs::create_dir_all(&dst_dir).await.ok();
+        if let Err(e) = tokio::fs::create_dir_all(&dst_dir).await {
+            eprintln!("Warning: failed to create directory {:?}: {}", dst_dir, e);
+        }
 
         let mut entries = tokio::fs::read_dir(&src_dir).await?;
         while let Some(entry) = entries.next_entry().await? {

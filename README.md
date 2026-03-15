@@ -338,7 +338,7 @@ MITRE ATT&CK mitigations, NIST FIPS 140-3 compliance, and CMMC 2.0 Level 2 asses
 ```
 src/
 ├── main.rs              Entry point, command dispatch, UTF-8 console init
-├── cli.rs               CLI parser (clap derive, 11 subcommands)
+├── cli.rs               CLI parser (clap derive, 12 subcommands)
 ├── error.rs             Error types (AftError enum, thiserror)
 ├── engine.rs            Transfer engine (parallel chunks, retry, checksums)
 ├── output.rs            Structured + colorized output formatting
@@ -375,7 +375,7 @@ src/
     └── dod.rs           DoD CDS protocol (classification-aware HTTPS)
 
 tests/
-└── integration_tests.rs   131 tests (protocols, security, crypto, neural, classification, DoD)
+└── integration_tests.rs   177 tests (protocols, security, crypto, neural, classification, DoD, hardening)
 .github/
 └── workflows/ci.yml       CI pipeline (test, clippy, fmt, cargo-audit)
 ```

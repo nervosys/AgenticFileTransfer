@@ -66,23 +66,23 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub agent: bool,
 
-    /// Number of parallel connections for chunked transfers
+    /// Number of parallel connections for chunked transfers (1–256)
     #[arg(long, default_value = "4", global = true)]
     pub parallel: usize,
 
-    /// Maximum number of retry attempts
+    /// Maximum number of retry attempts (0–100)
     #[arg(long, default_value = "3", global = true)]
     pub retries: u32,
 
-    /// Initial retry delay in milliseconds (exponential backoff: doubles each retry)
+    /// Initial retry delay in milliseconds (exponential backoff: doubles each retry, 1–300000)
     #[arg(long, default_value = "1000", global = true)]
     pub retry_delay_ms: u64,
 
-    /// Connection timeout in seconds
+    /// Connection timeout in seconds (0–3600)
     #[arg(long, default_value = "30", global = true)]
     pub connect_timeout: u64,
 
-    /// Transfer timeout in seconds (0 = no timeout)
+    /// Transfer timeout in seconds (0 = no timeout, max 86400)
     #[arg(long, default_value = "0", global = true)]
     pub timeout: u64,
 
@@ -101,6 +101,43 @@ pub struct Cli {
     /// Path to a custom CA certificate bundle (PEM file)
     #[arg(long, global = true)]
     pub ca_bundle: Option<String>,
+}
+
+impl Cli {
+    /// Validate CLI argument ranges (defense-in-depth beyond clap's type parsing).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.parallel == 0 || self.parallel > 256 {
+            return Err(format!(
+                "error: '--parallel' must be 1–256, got {}",
+                self.parallel
+            ));
+        }
+        if self.retries > 100 {
+            return Err(format!(
+                "error: '--retries' must be 0–100, got {}",
+                self.retries
+            ));
+        }
+        if self.retry_delay_ms == 0 || self.retry_delay_ms > 300_000 {
+            return Err(format!(
+                "error: '--retry-delay-ms' must be 1–300000, got {}",
+                self.retry_delay_ms
+            ));
+        }
+        if self.connect_timeout > 3600 {
+            return Err(format!(
+                "error: '--connect-timeout' must be 0–3600, got {}",
+                self.connect_timeout
+            ));
+        }
+        if self.timeout > 86400 {
+            return Err(format!(
+                "error: '--timeout' must be 0–86400, got {}",
+                self.timeout
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Subcommand, Debug)]
