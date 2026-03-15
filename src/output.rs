@@ -244,7 +244,7 @@ pub fn create_progress_bar(total: Option<u64>, format: Format) -> Option<indicat
                 .template(
                     "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta})",
                 )
-                .unwrap()
+                .expect("hardcoded progress bar template is valid")
                 .progress_chars("=> "),
         );
         pb
@@ -253,7 +253,7 @@ pub fn create_progress_bar(total: Option<u64>, format: Format) -> Option<indicat
         pb.set_style(
             indicatif::ProgressStyle::default_spinner()
                 .template("{spinner:.green} [{elapsed_precise}] {bytes} ({bytes_per_sec})")
-                .unwrap(),
+                .expect("hardcoded progress bar template is valid"),
         );
         pb
     };

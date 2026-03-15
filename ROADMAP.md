@@ -167,27 +167,44 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 
 ## Phase 13: Remote Telemetry
 
-| #   | Task                                                                        | Status |
-| --- | --------------------------------------------------------------------------- | ------ |
+| #   | Task                                                                         | Status |
+| --- | ---------------------------------------------------------------------------- | ------ |
 | 97  | TelemetryConfig struct with opt-in default, installation ID, remote endpoint | Done   |
 | 98  | TelemetryRecord struct for structured event data (JSONL format)              | Done   |
 | 99  | TelemetryStore with local JSONL persistence (~/.aft/telemetry_records.jsonl) | Done   |
 | 100 | TelemetryCollector convenience wrapper for batching events                   | Done   |
-| 101 | TelemetryEvent enum (commands, transfers, errors, app started)              | Done   |
-| 102 | Remote sync to AWS EC2 endpoint (reqwest async POST /ingest)                | Done   |
-| 103 | CLI subcommand: `aft telemetry status`                                      | Done   |
-| 104 | CLI subcommand: `aft telemetry opt-in` / `opt-out`                          | Done   |
-| 105 | CLI subcommand: `aft telemetry reset` (regenerate installation ID)          | Done   |
-| 106 | CLI subcommand: `aft telemetry sync` (manual remote upload)                 | Done   |
-| 107 | CLI subcommand: `aft telemetry clear` / `export`                            | Done   |
-| 108 | CLI subcommand: `aft telemetry config` (endpoint/api-key setup)             | Done   |
-| 109 | Integration tests for telemetry config validation                           | Done   |
+| 101 | TelemetryEvent enum (commands, transfers, errors, app started)               | Done   |
+| 102 | Remote sync to AWS EC2 endpoint (reqwest async POST /ingest)                 | Done   |
+| 103 | CLI subcommand: `aft telemetry status`                                       | Done   |
+| 104 | CLI subcommand: `aft telemetry opt-in` / `opt-out`                           | Done   |
+| 105 | CLI subcommand: `aft telemetry reset` (regenerate installation ID)           | Done   |
+| 106 | CLI subcommand: `aft telemetry sync` (manual remote upload)                  | Done   |
+| 107 | CLI subcommand: `aft telemetry clear` / `export`                             | Done   |
+| 108 | CLI subcommand: `aft telemetry config` (endpoint/api-key setup)              | Done   |
+| 109 | Integration tests for telemetry config validation                            | Done   |
+
+---
+
+## Phase 14: Audit & Hardening
+
+| #   | Task                                                                         | Status |
+| --- | ---------------------------------------------------------------------------- | ------ |
+| 110 | Wire telemetry into command execution (track_command, track_transfer, track_error) | Done |
+| 111 | Fix ontology serialization unwrap() panics (graceful fallback)               | Done   |
+| 112 | Fix WebDAV PROPFIND unwrap() with documented expect()                        | Done   |
+| 113 | Add recursion depth limit (MAX_COPY_DEPTH = 100) to recursive copy           | Done   |
+| 114 | Add crypto and telemetry operation schemas to ontology                       | Done   |
+| 115 | Reject unsupported transports (ws/quic) in serve command                     | Done   |
+| 116 | Fix progress bar template unwrap() with documented expect()                  | Done   |
+| 117 | Warn on config file corruption instead of silent fallback                    | Done   |
+| 118 | Fix DoD hardcoded range/resume support (conservative false default)          | Done   |
+| 119 | Wire audit logging for server lifecycle (ServerStart, ServerStop)            | Done   |
 
 ---
 
 ## Current Counts
 
-- **Done:** 109
+- **Done:** 119
 - **Planned:** 0
 
 ## Known Issues & Security Debt

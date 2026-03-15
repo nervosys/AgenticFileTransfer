@@ -217,6 +217,11 @@ impl AftpServer {
         );
         eprintln!();
 
+        audit::log_server_event(
+            audit::AuditEventType::ServerStart,
+            &format!("Listening on {}", addr),
+        );
+
         let server = Arc::new(ServerState {
             root,
             auth_token: self.auth_token,
@@ -291,6 +296,10 @@ impl AftpServer {
                 }
                 _ = tokio::signal::ctrl_c() => {
                     eprintln!("\n  {} Shutting down.", "*".yellow());
+                    audit::log_server_event(
+                        audit::AuditEventType::ServerStop,
+                        "Shutdown via Ctrl+C",
+                    );
                     break;
                 }
             }

@@ -55,7 +55,13 @@ async fn main() {
     enable_utf8_console();
 
     let mut cli = Cli::parse();
-    let _config = config::load_config().unwrap_or_default();
+    let _config = match config::load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{}: {} (using defaults)", "Config warning".yellow().bold(), e);
+            config::AftConfig::default()
+        }
+    };
 
     // Validate loaded config values
     if let Err(e) = _config.validate() {
@@ -110,10 +116,22 @@ async fn main() {
         }
     }
 
+    // Initialize telemetry (best-effort, never block on failure)
+    let mut telemetry = telemetry::TelemetryCollector::new().ok();
+    if let Some(ref mut t) = telemetry {
+        t.track(telemetry::TelemetryEvent::AppStarted {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+        });
+    }
+
+    let cmd_start = std::time::Instant::now();
     let result = run_command(&cli, format).await;
+    let cmd_duration_ms = cmd_start.elapsed().as_millis() as u64;
 
     match result {
-        Ok(output_result) => {
+        Ok(ref output_result) => {
             history::log_transfer(
                 &output_result.operation,
                 output_result.source.as_deref(),
@@ -123,12 +141,68 @@ async fn main() {
                 output_result.transfer.as_ref(),
                 output_result.error.as_deref(),
             );
-            output::print_result(&output_result, format);
+
+            // Record telemetry for successful command
+            if let Some(ref mut t) = telemetry {
+                let success = output_result.status == "success";
+                t.track_command(
+                    &output_result.operation,
+                    None,
+                    Some(cmd_duration_ms),
+                    success,
+                );
+
+                // Record transfer metrics if available
+                if let (Some(ref transfer), Some(ref protocol)) =
+                    (&output_result.transfer, &output_result.protocol)
+                {
+                    let direction = match output_result.operation.as_str() {
+                        "Get" | "Copy" => "download",
+                        "Put" => "upload",
+                        _ => "unknown",
+                    };
+                    t.track_transfer(
+                        protocol,
+                        direction,
+                        transfer.bytes_transferred,
+                        transfer.duration_ms,
+                        transfer.chunks_used as u32,
+                        false,
+                        false,
+                        false,
+                        success,
+                    );
+                }
+
+                if !success {
+                    if let Some(ref err) = output_result.error {
+                        // Only record error type, never full message (may contain PII)
+                        let error_type = if err.contains("timeout") {
+                            "timeout"
+                        } else if err.contains("not found") {
+                            "not_found"
+                        } else if err.contains("permission") {
+                            "permission_denied"
+                        } else if err.contains("checksum") {
+                            "checksum_mismatch"
+                        } else {
+                            "other"
+                        };
+                        t.track_error(error_type, Some(&output_result.operation));
+                    }
+                }
+            }
+
+            output::print_result(output_result, format);
             if output_result.status == "error" {
+                // Flush telemetry before exit
+                if let Some(ref mut t) = telemetry {
+                    let _ = t.flush();
+                }
                 std::process::exit(1);
             }
         }
-        Err(e) => {
+        Err(ref e) => {
             history::log_transfer(
                 "unknown",
                 None,
@@ -138,10 +212,25 @@ async fn main() {
                 None,
                 Some(&e.to_string()),
             );
+
+            if let Some(ref mut t) = telemetry {
+                t.track_command("unknown", None, Some(cmd_duration_ms), false);
+                t.track_error("fatal", None);
+            }
+
             let output_result = OutputResult::failure("unknown", &e.to_string());
             output::print_result(&output_result, format);
+            // Flush telemetry before exit
+            if let Some(ref mut t) = telemetry {
+                let _ = t.flush();
+            }
             std::process::exit(1);
         }
+    }
+
+    // Flush telemetry at normal exit
+    if let Some(ref mut t) = telemetry {
+        let _ = t.flush();
     }
 }
 
@@ -230,9 +319,16 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
             max_connections,
             transport,
         } => {
-            let _transport_type: aftp::transport::TransportType = transport
+            let transport_type: aftp::transport::TransportType = transport
                 .parse()
                 .map_err(|e: String| error::AftError::Other(e))?;
+
+            if transport_type != aftp::transport::TransportType::Tcp {
+                return Err(error::AftError::Other(format!(
+                    "Transport '{}' is not yet supported. Only TCP is currently implemented.",
+                    transport
+                )));
+            }
 
             let server = aftp::server::AftpServer::new(
                 root,
@@ -946,6 +1042,9 @@ async fn cmd_crypto(action: &cli::CryptoAction) -> AftResult<OutputResult> {
 // Recursive directory copy
 // ---------------------------------------------------------------------------
 
+/// Maximum directory traversal depth to prevent symlink loops / stack exhaustion.
+const MAX_COPY_DEPTH: usize = 100;
+
 async fn recursive_local_copy(
     source: &str,
     destination: &str,
@@ -969,9 +1068,17 @@ async fn recursive_local_copy(
     let handler = protocols::resolve_protocol(source)?;
     let opts = protocols::ProtocolOptions::default();
 
-    // Walk directory tree
-    let mut stack = vec![(src_path.to_path_buf(), dst_path.clone())];
-    while let Some((src_dir, dst_dir)) = stack.pop() {
+    // Walk directory tree with depth tracking
+    let mut stack: Vec<(std::path::PathBuf, PathBuf, usize)> =
+        vec![(src_path.to_path_buf(), dst_path.clone(), 0)];
+    while let Some((src_dir, dst_dir, depth)) = stack.pop() {
+        if depth > MAX_COPY_DEPTH {
+            return Ok(OutputResult::failure(
+                "Copy",
+                &format!("Maximum directory depth ({}) exceeded — possible symlink loop", MAX_COPY_DEPTH),
+            ));
+        }
+
         tokio::fs::create_dir_all(&dst_dir).await.ok();
 
         let mut entries = tokio::fs::read_dir(&src_dir).await?;
@@ -981,7 +1088,7 @@ async fn recursive_local_copy(
             let dest_entry = dst_dir.join(&entry_name);
 
             if file_type.is_dir() {
-                stack.push((entry.path(), dest_entry));
+                stack.push((entry.path(), dest_entry, depth + 1));
             } else if file_type.is_file() {
                 let src_str = entry.path().display().to_string();
                 let pb = output::create_progress_bar(None, format);
@@ -1108,10 +1215,16 @@ async fn cmd_telemetry(action: &TelemetryAction) -> AftResult<OutputResult> {
                     "{}",
                     "Remote telemetry is disabled. Use 'aft telemetry opt-in' to enable.".yellow()
                 );
-                return Ok(OutputResult::failure("Telemetry Sync", "Remote telemetry disabled"));
+                return Ok(OutputResult::failure(
+                    "Telemetry Sync",
+                    "Remote telemetry disabled",
+                ));
             }
 
-            println!("Syncing telemetry data to {}...", store.config().remote_endpoint);
+            println!(
+                "Syncing telemetry data to {}...",
+                store.config().remote_endpoint
+            );
 
             let result = store.sync_to_remote(*limit).await?;
 
@@ -1134,14 +1247,21 @@ async fn cmd_telemetry(action: &TelemetryAction) -> AftResult<OutputResult> {
             let store = TelemetryStore::new()?;
             let count = store.clear_records()?;
 
-            println!("{}", format!("Cleared {} telemetry records.", count).green());
+            println!(
+                "{}",
+                format!("Cleared {} telemetry records.", count).green()
+            );
 
             let mut out = OutputResult::success("Telemetry Clear");
             out.source = Some(format!("{} records cleared", count));
             Ok(out)
         }
 
-        TelemetryAction::Export { output, format, limit } => {
+        TelemetryAction::Export {
+            output,
+            format,
+            limit,
+        } => {
             let store = TelemetryStore::new()?;
             let records = store.read_records(None, None, None, None, *limit)?;
 
@@ -1164,7 +1284,10 @@ async fn cmd_telemetry(action: &TelemetryAction) -> AftResult<OutputResult> {
 
             if let Some(path) = output {
                 std::fs::write(path, &content)?;
-                println!("{}", format!("Exported {} records to {}", records.len(), path).green());
+                println!(
+                    "{}",
+                    format!("Exported {} records to {}", records.len(), path).green()
+                );
             } else {
                 println!("{}", content);
             }

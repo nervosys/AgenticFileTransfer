@@ -287,7 +287,11 @@ impl ProtocolHandler for WebDavHandler {
 
         let req = self
             .apply_auth(
-                client.request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &http_url),
+                client.request(
+                    reqwest::Method::from_bytes(b"PROPFIND")
+                        .expect("PROPFIND is a valid HTTP method"),
+                    &http_url,
+                ),
                 opts,
             )
             .header("Depth", "1")
