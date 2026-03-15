@@ -294,7 +294,11 @@ impl NeuralCipher {
             total_params * 4 / 1024
         );
 
-        // Training loop
+        // Training loop — pre-allocate buffers to avoid per-iteration allocation
+        let mut plaintext = vec![0.0f32; BLOCK_SIZE];
+        let mut quantized = vec![0.0f32; BLOCK_SIZE];
+        let mut grad = vec![0.0f32; BLOCK_SIZE];
+
         for epoch in 0..config.epochs {
             let mut total_loss = 0.0f64;
             // Linear learning rate decay (keep 10% at the end)
@@ -302,24 +306,23 @@ impl NeuralCipher {
 
             for _ in 0..config.batch_size {
                 // Random plaintext block (normalized to [0, 1])
-                let plaintext: Vec<f32> = (0..BLOCK_SIZE)
-                    .map(|_| rng.gen::<u8>() as f32 / 255.0)
-                    .collect();
+                for v in plaintext.iter_mut() {
+                    *v = rng.gen::<u8>() as f32 / 255.0;
+                }
 
                 // Forward: encoder → quantize (STE) → decoder
                 let encoded = cipher.encoder.forward(&plaintext);
 
-                // Quantization with straight-through estimator
-                let quantized: Vec<f32> = encoded
-                    .iter()
-                    .map(|&x| (x * 255.0).round() / 255.0)
-                    .collect();
+                // Quantization with straight-through estimator (reuse buffer)
+                quantized.resize(encoded.len(), 0.0);
+                for (q, &e) in quantized.iter_mut().zip(encoded.iter()) {
+                    *q = (e * 255.0).round() / 255.0;
+                }
 
                 let decoded = cipher.decoder.forward(&quantized);
 
                 // MSE loss
                 let mut loss = 0.0f32;
-                let mut grad = vec![0.0f32; BLOCK_SIZE];
                 for i in 0..BLOCK_SIZE {
                     let diff = decoded[i] - plaintext[i];
                     loss += diff * diff;

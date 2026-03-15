@@ -185,7 +185,11 @@ pub async fn upload(
 
     while retries <= config.max_retries {
         if retries > 0 {
-            let delay = config.retry_delay_ms * 2u64.pow(retries - 1);
+            let exp = (retries - 1).min(30);
+            let delay = config
+                .retry_delay_ms
+                .saturating_mul(2u64.saturating_pow(exp));
+            let delay = delay.min(300_000); // cap at 5 minutes
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
 
@@ -243,7 +247,11 @@ async fn retry_download(
 
     while *retries <= config.max_retries {
         if *retries > 0 {
-            let delay = config.retry_delay_ms * 2u64.pow(*retries - 1);
+            let exp = (*retries - 1).min(30);
+            let delay = config
+                .retry_delay_ms
+                .saturating_mul(2u64.saturating_pow(exp));
+            let delay = delay.min(300_000); // cap at 5 minutes
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
 

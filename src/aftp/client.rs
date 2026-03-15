@@ -261,7 +261,9 @@ impl AftpClient {
         let meta = parse_head_resp(&head.payload)?;
 
         if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent).await.ok();
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                eprintln!("Warning: failed to create directory {:?}: {}", parent, e);
+            }
         }
         let mut file = tokio::fs::File::create(dest).await?;
         let mut hasher = sha2::Sha256::new();

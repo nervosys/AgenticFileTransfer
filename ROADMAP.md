@@ -204,23 +204,38 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 
 ## Phase 15: Security Hardening II
 
-| #   | Task                                                                               | Status |
-| --- | ---------------------------------------------------------------------------------- | ------ |
-| 120 | Fix empty URL scheme bypass (vacuous truth in RFC 3986 validation)                 | Done   |
-| 121 | Fix chunked download fallback file corruption (truncate before retry)              | Done   |
-| 122 | Fix chunk range integer overflow (saturating arithmetic)                            | Done   |
-| 123 | Handle plugin registry mutex poisoning gracefully                                   | Done   |
-| 124 | Check Windows SetConsoleOutputCP return code                                        | Done   |
-| 125 | Warn on world-readable config file permissions (Unix)                               | Done   |
-| 126 | Bound rate limiter HashMap (MAX_TRACKED_IPS = 10,000, aggressive cleanup)           | Done   |
-| 127 | Sanitize server error messages (generic responses to clients)                       | Done   |
-| 128 | Add neural model SHA-256 signature verification (.aftnn.sha256 sidecar)             | Done   |
+| #   | Task                                                                      | Status |
+| --- | ------------------------------------------------------------------------- | ------ |
+| 120 | Fix empty URL scheme bypass (vacuous truth in RFC 3986 validation)        | Done   |
+| 121 | Fix chunked download fallback file corruption (truncate before retry)     | Done   |
+| 122 | Fix chunk range integer overflow (saturating arithmetic)                  | Done   |
+| 123 | Handle plugin registry mutex poisoning gracefully                         | Done   |
+| 124 | Check Windows SetConsoleOutputCP return code                              | Done   |
+| 125 | Warn on world-readable config file permissions (Unix)                     | Done   |
+| 126 | Bound rate limiter HashMap (MAX_TRACKED_IPS = 10,000, aggressive cleanup) | Done   |
+| 127 | Sanitize server error messages (generic responses to clients)             | Done   |
+| 128 | Add neural model SHA-256 signature verification (.aftnn.sha256 sidecar)   | Done   |
+
+---
+
+## Phase 16: Robustness & Validation
+
+| #   | Task                                                                              | Status |
+| --- | --------------------------------------------------------------------------------- | ------ |
+| 129 | Add CLI argument range validation (parallel 1–256, retries 0–100, delays, timeouts) | Done   |
+| 130 | Fix retry delay exponentiation overflow (saturating_mul, cap at 5 minutes)        | Done   |
+| 131 | Add 19 tests for Phase 14–15 fixes (CLI validation, retry, schemes, signatures)   | Done   |
+| 132 | Fix README.md test count (131 → 177) and subcommand count (11 → 12)               | Done   |
+| 133 | Neural training loop pre-allocated buffers (eliminate per-iteration .collect())    | Done   |
+| 134 | Rate limiter proactive cleanup threshold (100 → MAX_TRACKED_IPS / 2 = 5000)       | Done   |
+| 135 | Replace silent .ok() on create_dir_all with warning logs                          | Done   |
+| 136 | Fix ROADMAP architecture section (subcommand count 9 → 12, test count)             | Done   |
 
 ---
 
 ## Current Counts
 
-- **Done:** 128
+- **Done:** 136
 - **Planned:** 0
 
 ## Known Issues & Security Debt
@@ -238,7 +253,7 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 ```shell
 src/
 ├── main.rs                # Entry point, command dispatch, UTF-8 console init
-├── cli.rs                 # CLI parser (clap derive, 9 subcommands)
+├── cli.rs                 # CLI parser (clap derive, 12 subcommands)
 ├── error.rs               # Error types (AftError enum)
 ├── engine.rs              # Transfer engine (parallel chunks, retry, checksums)
 ├── output.rs              # Structured output (text/json/quiet)
@@ -275,7 +290,7 @@ src/
     ├── smb.rs             # SMB/CIFS (UNC + smbclient)
     └── dod.rs             # DoD CDS protocol (classification-aware HTTPS)
 tests/
-└── integration_tests.rs   # Integration & unit tests (protocols, security, crypto, neural, classification, DoD)
+└── integration_tests.rs   # Integration & unit tests (177 tests: protocols, security, crypto, hardening, telemetry)
 .github/
 └── workflows/ci.yml       # CI pipeline (test, clippy, fmt, cargo-audit)
 ```

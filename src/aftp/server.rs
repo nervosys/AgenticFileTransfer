@@ -75,8 +75,8 @@ impl AuthRateLimiter {
         entry.0 += 1;
         entry.1 = std::time::Instant::now();
 
-        // Purge expired entries to prevent unbounded growth
-        if self.failures.len() > 100 {
+        // Proactive cleanup at 50% capacity to prevent sudden eviction storms
+        if self.failures.len() > MAX_TRACKED_IPS / 2 {
             self.cleanup_expired();
         }
         // Hard cap: if still above limit after cleanup, drop oldest entries
@@ -760,7 +760,9 @@ where
     };
 
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.ok();
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            eprintln!("Warning: failed to create directory {:?}: {}", parent, e);
+        }
     }
 
     // Write to a temp file, rename on success for atomicity
