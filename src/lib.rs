@@ -7,17 +7,39 @@
 //! Provides quantum-resistant encryption (Kyber1024 + AES-256-GCM),
 //! DoD classification handling, neural network cipher research, and
 //! structured JSON output for agentic workflows.
+//!
+//! # Quick Start
+//!
+//! ```no_run
+//! use aft::engine::{TransferConfig, download};
+//! use aft::protocols::{resolve_protocol, ProtocolOptions};
+//! ```
 
 pub mod aftp;
-pub mod audit;
-pub mod cli;
-pub mod config;
 pub mod crypto;
 pub mod engine;
 pub mod error;
-pub mod history;
-pub mod ontology;
-pub mod output;
-pub mod plugins;
 pub mod protocols;
+
+// Internal modules — exposed for integration testing only
+#[doc(hidden)]
+pub mod audit;
+#[doc(hidden)]
+pub mod cli;
+#[doc(hidden)]
+pub mod config;
+#[doc(hidden)]
+pub mod history;
+#[doc(hidden)]
+pub mod ontology;
+#[doc(hidden)]
+pub mod output;
+#[doc(hidden)]
+pub mod plugins;
+#[doc(hidden)]
 pub mod telemetry;
+
+// Convenience re-exports
+pub use engine::{TransferConfig, TransferResult};
+pub use error::{AftError, AftResult};
+pub use protocols::{ProtocolHandler, ProtocolOptions};

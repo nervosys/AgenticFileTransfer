@@ -50,7 +50,7 @@ impl DodHandler {
         classification: Classification,
     ) -> AftResult<ProtocolOptions> {
         classification::validate_compliance(classification, opts.insecure)
-            .map_err(|e| AftError::Other(e))?;
+            .map_err(AftError::Other)?;
 
         let mut dod_opts = opts.clone();
         dod_opts.headers.insert(

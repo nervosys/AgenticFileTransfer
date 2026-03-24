@@ -76,6 +76,12 @@ struct LoadedPlugin {
     library: Option<Arc<libloading::Library>>,
 }
 
+impl Default for PluginRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PluginRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {

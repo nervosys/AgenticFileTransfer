@@ -33,7 +33,7 @@ pub struct PqcKeyPair {
 pub fn generate_keypair() -> AftResult<PqcKeyPair> {
     let mut rng = rand::rngs::OsRng;
     let keys = keypair(&mut rng)
-        .map_err(|e| AftError::Other(format!("Kyber key generation failed: {:?}", e)))?;
+        .map_err(|e| AftError::CryptoError(format!("Kyber key generation failed: {:?}", e)))?;
     Ok(PqcKeyPair {
         public_key: keys.public.to_vec(),
         secret_key: keys.secret.to_vec(),
@@ -112,11 +112,11 @@ pub fn encrypt(plaintext: &[u8], pub_key_path: &Path) -> AftResult<(Vec<u8>, Vec
 
     // KEM encapsulate → 32-byte shared secret
     let (kem_ct, shared_secret) = encapsulate(&pub_key, &mut rng)
-        .map_err(|e| AftError::Other(format!("Kyber encapsulation failed: {:?}", e)))?;
+        .map_err(|e| AftError::CryptoError(format!("Kyber encapsulation failed: {:?}", e)))?;
 
     // AES-256-GCM with the shared secret as key
     let cipher = Aes256Gcm::new_from_slice(&shared_secret)
-        .map_err(|e| AftError::Other(format!("AES key error: {}", e)))?;
+        .map_err(|e| AftError::CryptoError(format!("AES key error: {}", e)))?;
 
     let mut nonce_bytes = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
@@ -124,7 +124,7 @@ pub fn encrypt(plaintext: &[u8], pub_key_path: &Path) -> AftResult<(Vec<u8>, Vec
 
     let ciphertext = cipher
         .encrypt(nonce, plaintext)
-        .map_err(|e| AftError::Other(format!("AES-GCM encryption failed: {}", e)))?;
+        .map_err(|e| AftError::CryptoError(format!("AES-GCM encryption failed: {}", e)))?;
 
     // Combine: nonce || ciphertext (tag is appended by aes-gcm)
     let mut result = Vec::with_capacity(12 + ciphertext.len());
@@ -144,21 +144,21 @@ pub fn decrypt(
 
     // KEM decapsulate → recover shared secret
     let shared_secret = decapsulate(kem_ct, &sec_key)
-        .map_err(|e| AftError::Other(format!("Kyber decapsulation failed: {:?}", e)))?;
+        .map_err(|e| AftError::CryptoError(format!("Kyber decapsulation failed: {:?}", e)))?;
 
     // AES-256-GCM decrypt
     let cipher = Aes256Gcm::new_from_slice(&shared_secret)
-        .map_err(|e| AftError::Other(format!("AES key error: {}", e)))?;
+        .map_err(|e| AftError::CryptoError(format!("AES key error: {}", e)))?;
 
     if encrypted.len() < 12 {
-        return Err(AftError::Other("Encrypted data too short for nonce".into()));
+        return Err(AftError::CryptoError("Encrypted data too short for nonce".into()));
     }
     let nonce = Nonce::from_slice(&encrypted[..12]);
     let ciphertext = &encrypted[12..];
 
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|e| AftError::Other(format!("AES-GCM decryption failed: {}", e)))?;
+        .map_err(|e| AftError::CryptoError(format!("AES-GCM decryption failed: {}", e)))?;
 
     Ok(plaintext)
 }
@@ -169,7 +169,7 @@ pub fn encapsulate_key(pub_key_path: &Path) -> AftResult<(Vec<u8>, Vec<u8>)> {
     let pub_key = load_public_key(pub_key_path)?;
     let mut rng = rand::rngs::OsRng;
     let (ct, ss) = encapsulate(&pub_key, &mut rng)
-        .map_err(|e| AftError::Other(format!("Kyber encapsulation failed: {:?}", e)))?;
+        .map_err(|e| AftError::CryptoError(format!("Kyber encapsulation failed: {:?}", e)))?;
     Ok((ct.to_vec(), ss.to_vec()))
 }
 
@@ -178,6 +178,6 @@ pub fn encapsulate_key(pub_key_path: &Path) -> AftResult<(Vec<u8>, Vec<u8>)> {
 pub fn decapsulate_key(kem_ct: &[u8], sec_key_path: &Path) -> AftResult<Vec<u8>> {
     let sec_key = load_secret_key(sec_key_path)?;
     let ss = decapsulate(kem_ct, &sec_key)
-        .map_err(|e| AftError::Other(format!("Kyber decapsulation failed: {:?}", e)))?;
+        .map_err(|e| AftError::CryptoError(format!("Kyber decapsulation failed: {:?}", e)))?;
     Ok(ss.to_vec())
 }

@@ -20,6 +20,7 @@ impl FtpHandler {
 }
 
 /// Parse an FTP URL into (host, port, user, password, path).
+#[allow(clippy::type_complexity)]
 fn parse_ftp_url(url: &str) -> AftResult<(String, u16, Option<String>, Option<String>, String)> {
     let parsed = url::Url::parse(url)
         .map_err(|e| AftError::InvalidUrl(format!("Invalid FTP URL: {}", e)))?;

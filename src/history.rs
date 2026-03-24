@@ -46,7 +46,7 @@ pub fn log_transfer(
     };
 
     // Ensure directory exists
-    if let Err(_) = config::ensure_aft_dir() {
+    if config::ensure_aft_dir().is_err() {
         return;
     }
 

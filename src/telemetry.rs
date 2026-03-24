@@ -1,5 +1,5 @@
 // Copyright (c) 2024-2026 Nervosys LLC
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Telemetry module for anonymous usage data collection.
 //!
 //! This module provides opt-in (enabled by default) anonymous usage telemetry
@@ -61,14 +61,14 @@ fn default_true() -> bool {
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
-            enabled: true,            // Enabled by default
+            enabled: true, // Enabled by default
             installation_id: generate_uuid(),
             created_at: chrono::Utc::now().timestamp(),
             preference_changed_at: None,
             version: 1,
             remote_endpoint: DEFAULT_TELEMETRY_ENDPOINT.to_string(),
             remote_api_key: None,
-            remote_enabled: true,     // Remote sending enabled by default
+            remote_enabled: true, // Remote sending enabled by default
         }
     }
 }
@@ -162,7 +162,6 @@ impl TelemetryConfig {
     }
 
     /// Check if telemetry is enabled
-    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -194,7 +193,6 @@ impl TelemetryConfig {
 /// Types of telemetry events we track
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-#[allow(dead_code)]
 pub enum TelemetryEvent {
     /// CLI command invoked
     CommandInvoked {
@@ -281,7 +279,6 @@ pub struct TelemetryRecord {
 
 impl TelemetryRecord {
     /// Create a new telemetry record
-    #[allow(dead_code)]
     pub fn new(
         installation_id: &str,
         category: &str,
@@ -336,13 +333,11 @@ impl TelemetryStore {
     }
 
     /// Check if telemetry is enabled
-    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.config.is_enabled()
     }
 
     /// Record a new telemetry event
-    #[allow(dead_code)]
     pub fn record(
         &self,
         category: &str,
@@ -380,7 +375,6 @@ impl TelemetryStore {
     }
 
     /// Record a TelemetryEvent
-    #[allow(dead_code)]
     pub fn record_event(&self, event: TelemetryEvent) -> AftResult<TelemetryRecord> {
         if !self.is_enabled() {
             return Err(AftError::Other("Telemetry is disabled".into()));
@@ -420,7 +414,10 @@ impl TelemetryStore {
                 d.insert("direction".to_string(), serde_json::json!(direction));
                 d.insert("size_bytes".to_string(), serde_json::json!(size_bytes));
                 d.insert("duration_ms".to_string(), serde_json::json!(duration_ms));
-                d.insert("parallel_connections".to_string(), serde_json::json!(parallel_connections));
+                d.insert(
+                    "parallel_connections".to_string(),
+                    serde_json::json!(parallel_connections),
+                );
                 d.insert("resumed".to_string(), serde_json::json!(resumed));
                 d.insert("compressed".to_string(), serde_json::json!(compressed));
                 d.insert("encrypted".to_string(), serde_json::json!(encrypted));
@@ -443,7 +440,10 @@ impl TelemetryStore {
                 d.insert("protocol".to_string(), serde_json::json!(protocol));
                 ("usage", "protocol_used", d)
             }
-            TelemetryEvent::ErrorOccurred { error_type, command } => {
+            TelemetryEvent::ErrorOccurred {
+                error_type,
+                command,
+            } => {
                 let mut d = HashMap::new();
                 d.insert("error_type".to_string(), serde_json::json!(error_type));
                 if let Some(cmd) = command {
@@ -553,7 +553,7 @@ impl TelemetryStore {
     }
 
     /// Get the installation ID
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Public API for telemetry consumers
     pub fn installation_id(&self) -> &str {
         &self.config.installation_id
     }
@@ -591,7 +591,10 @@ impl TelemetryStore {
         // Send to remote endpoint
         let client = reqwest::Client::new();
         let mut request = client
-            .post(format!("{}/ingest", self.config.remote_endpoint.trim_end_matches('/')))
+            .post(format!(
+                "{}/ingest",
+                self.config.remote_endpoint.trim_end_matches('/')
+            ))
             .header("Content-Type", "application/json")
             .header("User-Agent", format!("aft/{}", env!("CARGO_PKG_VERSION")));
 
@@ -612,7 +615,10 @@ impl TelemetryStore {
                     })
                 } else {
                     let status = resp.status();
-                    let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                    let error_text = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unknown error".to_string());
                     Ok(SyncResult {
                         records_sent: 0,
                         success: false,
@@ -642,13 +648,11 @@ pub struct SyncResult {
 // =============================================================================
 
 /// Telemetry collector that batches and sends events
-#[allow(dead_code)]
 pub struct TelemetryCollector {
     store: TelemetryStore,
     pending_events: Vec<TelemetryEvent>,
 }
 
-#[allow(dead_code)]
 impl TelemetryCollector {
     /// Create a new telemetry collector
     pub fn new() -> AftResult<Self> {
@@ -723,6 +727,7 @@ impl TelemetryCollector {
     }
 
     /// Get the installation ID
+    #[allow(dead_code)] // Public API for telemetry consumers
     pub fn installation_id(&self) -> &str {
         self.store.installation_id()
     }
@@ -790,7 +795,11 @@ pub fn format_telemetry_info(config: &TelemetryConfig) -> String {
         .replace("{installation_id}", &config.installation_id)
         .replace(
             "{status}",
-            if config.enabled { "Enabled" } else { "Disabled" },
+            if config.enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            },
         )
         .replace("{endpoint}", &config.remote_endpoint)
 }

@@ -220,22 +220,37 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 
 ## Phase 16: Robustness & Validation
 
-| #   | Task                                                                              | Status |
-| --- | --------------------------------------------------------------------------------- | ------ |
+| #   | Task                                                                                | Status |
+| --- | ----------------------------------------------------------------------------------- | ------ |
 | 129 | Add CLI argument range validation (parallel 1–256, retries 0–100, delays, timeouts) | Done   |
-| 130 | Fix retry delay exponentiation overflow (saturating_mul, cap at 5 minutes)        | Done   |
-| 131 | Add 19 tests for Phase 14–15 fixes (CLI validation, retry, schemes, signatures)   | Done   |
-| 132 | Fix README.md test count (131 → 177) and subcommand count (11 → 12)               | Done   |
-| 133 | Neural training loop pre-allocated buffers (eliminate per-iteration .collect())    | Done   |
-| 134 | Rate limiter proactive cleanup threshold (100 → MAX_TRACKED_IPS / 2 = 5000)       | Done   |
-| 135 | Replace silent .ok() on create_dir_all with warning logs                          | Done   |
-| 136 | Fix ROADMAP architecture section (subcommand count 9 → 12, test count)             | Done   |
+| 130 | Fix retry delay exponentiation overflow (saturating_mul, cap at 5 minutes)          | Done   |
+| 131 | Add 19 tests for Phase 14–15 fixes (CLI validation, retry, schemes, signatures)     | Done   |
+| 132 | Fix README.md test count (131 → 177) and subcommand count (11 → 12)                 | Done   |
+| 133 | Neural training loop pre-allocated buffers (eliminate per-iteration .collect())     | Done   |
+| 134 | Rate limiter proactive cleanup threshold (100 → MAX_TRACKED_IPS / 2 = 5000)         | Done   |
+| 135 | Replace silent .ok() on create_dir_all with warning logs                            | Done   |
+| 136 | Fix ROADMAP architecture section (subcommand count 9 → 12, test count)              | Done   |
+
+---
+
+## Phase 17: Intermittent Connection Resilience
+
+| #   | Task                                                                            | Status |
+| --- | ------------------------------------------------------------------------------- | ------ |
+| 137 | FRAME_RESUME / FRAME_RESUME_ACK frame types and CAP_SESSION_RESUME capability   | Done   |
+| 138 | Server-side SessionStore with bounded expiring sessions (10 min, 10 K cap)      | Done   |
+| 139 | HELLO_ACK now carries a session ID for resumable connections                    | Done   |
+| 140 | Server handle_connection supports RESUME handshake as alternative to HELLO      | Done   |
+| 141 | Server PUT handler tracks per-session upload progress (path + bytes received)   | Done   |
+| 142 | Client connect() returns session_id; resume_connect() sends FRAME_RESUME        | Done   |
+| 143 | Client upload_resume() resumes a PUT from the server's acknowledged byte offset | Done   |
+| 144 | 9 new tests: RESUME/RESUME_ACK roundtrips, HELLO_ACK session, capability bits   | Done   |
 
 ---
 
 ## Current Counts
 
-- **Done:** 136
+- **Done:** 144
 - **Planned:** 0
 
 ## Known Issues & Security Debt

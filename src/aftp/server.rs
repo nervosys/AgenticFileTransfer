@@ -35,6 +35,13 @@ const AUTH_MAX_FAILURES: u32 = 5;
 const AUTH_LOCKOUT_SECS: u64 = 60;
 /// Idle connection timeout in seconds.
 const CONNECTION_IDLE_TIMEOUT_SECS: u64 = 300;
+/// Default keepalive interval in seconds (0 = disabled).
+#[allow(dead_code)]
+const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 30;
+/// Maximum lifetime of a resumable session (10 minutes).
+const SESSION_MAX_AGE_SECS: u64 = 600;
+/// Maximum number of tracked sessions.
+const MAX_SESSIONS: usize = 10_000;
 
 /// Per-IP rate limiter for authentication attempts.
 /// Bounded to MAX_TRACKED_IPS to prevent memory exhaustion under DoS.
@@ -97,6 +104,112 @@ impl AuthRateLimiter {
     }
 }
 
+// ── Resumable session tracking ──────────────────────────────────────────────
+
+/// Tracks a single resumable session on the server. When a client is
+/// performing a PUT and the connection drops, the session records how many
+/// bytes were received so the client can reconnect and continue.
+struct SessionEntry {
+    /// IP address that created the session (used for auth binding).
+    ip: std::net::IpAddr,
+    /// Wall-clock time the session was created.
+    created: std::time::Instant,
+    /// Remote path of the in-progress transfer (empty if none).
+    path: String,
+    /// Bytes successfully received and flushed for this transfer.
+    bytes_received: u64,
+    /// Whether the original connection was authenticated.
+    #[allow(dead_code)]
+    authenticated: bool,
+}
+
+/// Bounded, expiring store of resumable sessions.
+struct SessionStore {
+    sessions: HashMap<String, SessionEntry>,
+}
+
+impl SessionStore {
+    fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+        }
+    }
+
+    /// Generate a cryptographically random session ID (hex-encoded 16 bytes).
+    fn generate_id() -> String {
+        let mut buf = [0u8; 16];
+        rand::Rng::fill(&mut rand::thread_rng(), &mut buf);
+        hex::encode(buf)
+    }
+
+    /// Insert a new session. Returns the session ID.
+    fn create(&mut self, ip: std::net::IpAddr, authenticated: bool) -> String {
+        self.cleanup_expired();
+        let id = Self::generate_id();
+        self.sessions.insert(
+            id.clone(),
+            SessionEntry {
+                ip,
+                created: std::time::Instant::now(),
+                path: String::new(),
+                bytes_received: 0,
+                authenticated,
+            },
+        );
+        id
+    }
+
+    /// Update the transfer progress for a session.
+    fn update_progress(&mut self, id: &str, path: &str, bytes_received: u64) {
+        if let Some(entry) = self.sessions.get_mut(id) {
+            entry.path = path.to_string();
+            entry.bytes_received = bytes_received;
+        }
+    }
+
+    /// Look up a session, verifying it belongs to the same IP and hasn't expired.
+    fn get(&mut self, id: &str, ip: &std::net::IpAddr) -> Option<&SessionEntry> {
+        // Check existence and validity before returning
+        let valid = self
+            .sessions
+            .get(id)
+            .is_some_and(|e| e.ip == *ip && e.created.elapsed().as_secs() < SESSION_MAX_AGE_SECS);
+        if valid {
+            self.sessions.get(id)
+        } else {
+            // Remove expired or invalid entry
+            self.sessions.remove(id);
+            None
+        }
+    }
+
+    /// Remove a session (e.g. after successful completion).
+    #[allow(dead_code)]
+    fn remove(&mut self, id: &str) {
+        self.sessions.remove(id);
+    }
+
+    /// Evict expired sessions and enforce hard cap.
+    fn cleanup_expired(&mut self) {
+        self.sessions
+            .retain(|_, e| e.created.elapsed().as_secs() < SESSION_MAX_AGE_SECS);
+        // Hard cap to prevent memory exhaustion
+        while self.sessions.len() > MAX_SESSIONS {
+            // Remove oldest session
+            if let Some(oldest_key) = self
+                .sessions
+                .iter()
+                .max_by_key(|(_, e)| e.created.elapsed())
+                .map(|(k, _)| k.clone())
+            {
+                self.sessions.remove(&oldest_key);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
 pub struct AftpServer {
     root: PathBuf,
     port: u16,
@@ -112,6 +225,7 @@ pub struct AftpServer {
 }
 
 impl AftpServer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         root: impl Into<PathBuf>,
         port: u16,
@@ -237,6 +351,7 @@ impl AftpServer {
             max_frame_size: self.max_frame_size,
             verbose: self.verbose,
             rate_limiter: Mutex::new(AuthRateLimiter::new()),
+            sessions: Mutex::new(SessionStore::new()),
         });
 
         let tls_acceptor = tls_acceptor.map(Arc::new);
@@ -323,6 +438,7 @@ struct ServerState {
     max_frame_size: u32,
     verbose: bool,
     rate_limiter: Mutex<AuthRateLimiter>,
+    sessions: Mutex<SessionStore>,
 }
 
 impl ServerState {
@@ -372,38 +488,33 @@ impl ServerState {
     }
 }
 
-// ── Connection handler ──────────────────────────────────────────────────────
+// ── Handshake helpers ───────────────────────────────────────────────────────
 
-async fn handle_connection<R, W>(
-    state: Arc<ServerState>,
-    rd: R,
-    wr: W,
+/// Handle a fresh HELLO handshake: authenticate, negotiate capabilities, create
+/// a resumable session, and send HELLO_ACK with the session ID.
+///
+/// Returns `(use_compression, max_payload, session_id)`.
+async fn handle_hello_handshake<R, W>(
+    state: &ServerState,
+    reader: &mut BufReader<R>,
+    writer: &mut BufWriter<W>,
+    hello_frame: &Frame,
     addr: SocketAddr,
-) -> AftResult<()>
+) -> AftResult<(bool, u32, String)>
 where
-    R: tokio::io::AsyncRead + Unpin + Send,
-    W: tokio::io::AsyncWrite + Unpin + Send,
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
 {
-    let mut reader = BufReader::with_capacity(READ_BUF, rd);
-    let mut writer = BufWriter::with_capacity(WRITE_BUF, wr);
+    let hello_data = parse_hello(&hello_frame.payload)?;
 
-    // ── Handshake ───────────────────────────────────────────────────────
-    let hello = read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?;
-    if hello.frame_type != FRAME_HELLO {
-        send_error(&mut writer, ERR_INVALID_REQUEST, "Expected HELLO").await?;
-        return Err(AftError::Other("Client did not send HELLO".into()));
-    }
-
-    let hello_data = parse_hello(&hello.payload)?;
-
-    // ── Authentication ────────────────────────────────────────────────────
-    if let Some(ref expected) = state.auth_token {
-        // Check rate limiting before processing auth
+    // ── Authentication ──────────────────────────────────────────────────
+    let authenticated = if let Some(ref expected) = state.auth_token {
+        // Check rate limiting
         {
             let mut limiter = state.rate_limiter.lock().await;
             if limiter.is_locked_out(&addr.ip()) {
                 send_error(
-                    &mut writer,
+                    writer,
                     ERR_AUTH_FAILED,
                     "Too many failed auth attempts. Try again later.",
                 )
@@ -426,14 +537,10 @@ where
             rand::Rng::fill(&mut rand::thread_rng(), &mut nonce);
 
             let challenge_payload = build_auth_challenge(&nonce);
-            write_frame(
-                &mut writer,
-                &Frame::new(FRAME_AUTH_CHALLENGE, challenge_payload),
-            )
-            .await?;
+            write_frame(writer, &Frame::new(FRAME_AUTH_CHALLENGE, challenge_payload)).await?;
             writer.flush().await?;
 
-            let resp_frame = read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?;
+            let resp_frame = read_frame(reader, INITIAL_MAX_PAYLOAD).await?;
             if resp_frame.frame_type != FRAME_AUTH_RESPONSE {
                 let mut limiter = state.rate_limiter.lock().await;
                 limiter.record_failure(addr.ip());
@@ -441,16 +548,15 @@ where
                     &addr.ip().to_string(),
                     "invalid frame type during challenge",
                 );
-                send_error(&mut writer, ERR_AUTH_FAILED, "Expected AUTH_RESPONSE").await?;
+                send_error(writer, ERR_AUTH_FAILED, "Expected AUTH_RESPONSE").await?;
                 if state.verbose {
                     eprintln!("  {} {} auth FAILED (bad frame type)", "!".yellow(), addr);
                 }
-                return Err(AftError::PermissionDenied("Auth failed".into()));
+                return Err(AftError::AuthFailed("Auth failed".into()));
             }
 
             let resp_data = parse_auth_response(&resp_frame.payload)?;
 
-            // Compute expected HMAC-SHA256(token, nonce)
             use hmac::{Hmac, Mac};
             type HmacSha256 = Hmac<sha2::Sha256>;
             let mut mac = HmacSha256::new_from_slice(expected.as_bytes()).expect("HMAC key length");
@@ -459,11 +565,11 @@ where
                 let mut limiter = state.rate_limiter.lock().await;
                 limiter.record_failure(addr.ip());
                 audit::log_auth_failure(&addr.ip().to_string(), "HMAC verification failed");
-                send_error(&mut writer, ERR_AUTH_FAILED, "HMAC verification failed").await?;
+                send_error(writer, ERR_AUTH_FAILED, "HMAC verification failed").await?;
                 if state.verbose {
                     eprintln!("  {} {} auth FAILED (bad HMAC)", "!".yellow(), addr);
                 }
-                return Err(AftError::PermissionDenied("Auth failed".into()));
+                return Err(AftError::AuthFailed("Auth failed".into()));
             }
         } else {
             // Simple token auth
@@ -471,11 +577,11 @@ where
                 let mut limiter = state.rate_limiter.lock().await;
                 limiter.record_failure(addr.ip());
                 audit::log_auth_failure(&addr.ip().to_string(), "invalid token");
-                send_error(&mut writer, ERR_AUTH_FAILED, "Invalid auth token").await?;
+                send_error(writer, ERR_AUTH_FAILED, "Invalid auth token").await?;
                 if state.verbose {
                     eprintln!("  {} {} auth FAILED (bad token)", "!".yellow(), addr);
                 }
-                return Err(AftError::PermissionDenied("Auth failed".into()));
+                return Err(AftError::AuthFailed("Auth failed".into()));
             }
         }
 
@@ -485,28 +591,125 @@ where
             limiter.clear(&addr.ip());
         }
         audit::log_auth_success(&addr.ip().to_string());
-    }
+        true
+    } else {
+        false
+    };
 
     // ── Capability negotiation ──────────────────────────────────────────
-    // Negotiate capabilities (intersection)
     let mut agreed_caps = hello_data.capabilities;
     if !state.compression {
         agreed_caps &= !CAP_COMPRESSION;
     }
-    // Always support checksum on our side
     agreed_caps |= CAP_CHECKSUM;
-    // Advertise challenge auth support
     if state.auth_challenge && state.auth_token.is_some() {
         agreed_caps |= CAP_AUTH_CHALLENGE;
     }
+    // Advertise session-resume support
+    agreed_caps |= CAP_SESSION_RESUME;
 
     let use_compression = agreed_caps & CAP_COMPRESSION != 0;
 
-    let ack_payload = build_hello_ack(agreed_caps, state.max_frame_size);
-    write_frame(&mut writer, &Frame::new(FRAME_HELLO_ACK, ack_payload)).await?;
+    // Create a resumable session
+    let session_id = {
+        let mut store = state.sessions.lock().await;
+        store.create(addr.ip(), authenticated)
+    };
+
+    let ack_payload = build_hello_ack_with_session(agreed_caps, state.max_frame_size, &session_id);
+    write_frame(writer, &Frame::new(FRAME_HELLO_ACK, ack_payload)).await?;
     writer.flush().await?;
 
-    let max_payload = state.max_frame_size + 1024; // small margin for framing
+    let max_payload = state.max_frame_size + 1024;
+    Ok((use_compression, max_payload, session_id))
+}
+
+/// Handle a RESUME handshake: look up the session, verify ownership, and send
+/// RESUME_ACK with the byte offset the server already has.
+///
+/// Returns `(use_compression, max_payload, session_id)`.
+async fn handle_resume_handshake<W>(
+    state: &ServerState,
+    writer: &mut BufWriter<W>,
+    resume_frame: &Frame,
+    addr: SocketAddr,
+) -> AftResult<(bool, u32, String)>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let resume_data = parse_resume(&resume_frame.payload)?;
+
+    let (accepted, resume_offset, last_path) = {
+        let mut store = state.sessions.lock().await;
+        match store.get(&resume_data.session_id, &addr.ip()) {
+            Some(entry) => {
+                let offset = entry.bytes_received;
+                let path = entry.path.clone();
+                (true, offset, path)
+            }
+            None => (false, 0, String::new()),
+        }
+    };
+
+    if !accepted {
+        let ack = build_resume_ack(false, 0, "");
+        write_frame(writer, &Frame::new(FRAME_RESUME_ACK, ack)).await?;
+        writer.flush().await?;
+        return Err(AftError::Other("Session not found or expired".into()));
+    }
+
+    let ack = build_resume_ack(true, resume_offset, &last_path);
+    write_frame(writer, &Frame::new(FRAME_RESUME_ACK, ack)).await?;
+    writer.flush().await?;
+
+    if state.verbose {
+        eprintln!(
+            "  {} {} resumed session {} at offset {}",
+            "↻".green().bold(),
+            addr,
+            &resume_data.session_id[..8],
+            resume_offset,
+        );
+    }
+
+    // Inherit compression from original negotiation — for simplicity we
+    // assume the same settings as the original HELLO (the session store
+    // records authenticated status; compression is server-wide).
+    let use_compression = state.compression;
+    let max_payload = state.max_frame_size + 1024;
+    Ok((use_compression, max_payload, resume_data.session_id))
+}
+
+// ── Connection handler ──────────────────────────────────────────────────────
+
+async fn handle_connection<R, W>(
+    state: Arc<ServerState>,
+    rd: R,
+    wr: W,
+    addr: SocketAddr,
+) -> AftResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send,
+    W: tokio::io::AsyncWrite + Unpin + Send,
+{
+    let mut reader = BufReader::with_capacity(READ_BUF, rd);
+    let mut writer = BufWriter::with_capacity(WRITE_BUF, wr);
+
+    // ── Handshake (HELLO or RESUME) ─────────────────────────────────────
+    let first_frame = read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?;
+
+    let (use_compression, max_payload, session_id) = match first_frame.frame_type {
+        FRAME_HELLO => {
+            handle_hello_handshake(&state, &mut reader, &mut writer, &first_frame, addr).await?
+        }
+        FRAME_RESUME => handle_resume_handshake(&state, &mut writer, &first_frame, addr).await?,
+        _ => {
+            send_error(&mut writer, ERR_INVALID_REQUEST, "Expected HELLO or RESUME").await?;
+            return Err(AftError::Other(
+                "Client did not send HELLO or RESUME".into(),
+            ));
+        }
+    };
 
     // ── Request loop ────────────────────────────────────────────────────
     let idle_timeout = std::time::Duration::from_secs(CONNECTION_IDLE_TIMEOUT_SECS);
@@ -546,7 +749,16 @@ where
                 handle_head(&state, &mut writer, &frame).await?;
             }
             FRAME_PUT => {
-                handle_put(&state, &mut reader, &mut writer, &frame, max_payload, addr).await?;
+                handle_put(
+                    &state,
+                    &mut reader,
+                    &mut writer,
+                    &frame,
+                    max_payload,
+                    addr,
+                    &session_id,
+                )
+                .await?;
             }
             FRAME_LIST => {
                 handle_list(&state, &mut writer, &frame).await?;
@@ -745,6 +957,7 @@ async fn handle_put<R, W>(
     frame: &Frame,
     max_payload: u32,
     addr: SocketAddr,
+    session_id: &str,
 ) -> AftResult<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -791,6 +1004,12 @@ where
                 hasher.update(&payload);
                 file.write_all(&payload).await?;
                 total_received += payload.len() as u64;
+
+                // Track progress so a resumed connection can continue from here
+                {
+                    let mut store = state.sessions.lock().await;
+                    store.update_progress(session_id, &req.path, total_received);
+                }
             }
             FRAME_DATA_END => {
                 let end_data = parse_data_end(&data_frame.payload)?;
@@ -945,7 +1164,9 @@ async fn send_err_from<W: tokio::io::AsyncWrite + Unpin>(
     // Return only generic messages to clients — never leak internal paths.
     let (code, msg) = match err {
         AftError::FileNotFound(_) => (ERR_NOT_FOUND, "Not found"),
-        AftError::PermissionDenied(_) => (ERR_PERMISSION_DENIED, "Access denied"),
+        AftError::PermissionDenied(_) | AftError::AuthFailed(_) => {
+            (ERR_PERMISSION_DENIED, "Access denied")
+        }
         _ => (ERR_INTERNAL, "Internal server error"),
     };
     send_error(writer, code, msg).await

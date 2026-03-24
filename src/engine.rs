@@ -7,6 +7,9 @@ use tokio::sync::Mutex;
 use crate::error::{AftError, AftResult};
 use crate::protocols::{ProtocolHandler, ProtocolOptions};
 
+/// Progress callback type: (bytes_transferred, total_size)
+pub type ProgressCb = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
+
 /// Configuration for the transfer engine
 #[derive(Debug, Clone)]
 pub struct TransferConfig {
@@ -78,7 +81,7 @@ pub async fn download(
     dest: &Path,
     opts: &ProtocolOptions,
     config: &TransferConfig,
-    progress_cb: Option<Arc<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    progress_cb: Option<ProgressCb>,
 ) -> AftResult<TransferResult> {
     let start = std::time::Instant::now();
     let mut retries = 0u32;
@@ -100,12 +103,10 @@ pub async fn download(
 
     // Decide between parallel chunked download and single-stream
     let use_chunks = supports_ranges
-        && total_size.is_some()
         && config.parallel_chunks > 1
-        && total_size.unwrap() > config.chunk_size * 2;
+        && matches!(total_size, Some(t) if t > config.chunk_size * 2);
 
-    let bytes = if use_chunks {
-        let total = total_size.unwrap();
+    let bytes = if let (true, Some(total)) = (use_chunks, total_size) {
         match chunked_download(handler, url, dest, opts, config, total, progress_cb.clone()).await {
             Ok(bytes) => bytes,
             Err(_) => {
@@ -169,6 +170,7 @@ pub async fn download(
 }
 
 /// Execute an upload with automatic retry and exponential backoff
+#[allow(clippy::too_many_arguments)]
 pub async fn upload(
     handler: &dyn ProtocolHandler,
     source: &Path,
@@ -177,7 +179,7 @@ pub async fn upload(
     config: &TransferConfig,
     content_type: Option<&str>,
     method: Option<&str>,
-    progress_cb: Option<Arc<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    progress_cb: Option<ProgressCb>,
 ) -> AftResult<TransferResult> {
     let start = std::time::Instant::now();
     let mut retries = 0u32;
@@ -193,11 +195,10 @@ pub async fn upload(
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
 
-        let cb: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>> =
-            progress_cb.clone().map(|cb| {
-                Box::new(move |bytes: u64, total: Option<u64>| cb(bytes, total))
-                    as Box<dyn Fn(u64, Option<u64>) + Send + Sync>
-            });
+        let cb = progress_cb.clone().map(|cb| {
+            Box::new(move |bytes: u64, total: Option<u64>| cb(bytes, total))
+                as Box<dyn Fn(u64, Option<u64>) + Send + Sync>
+        });
 
         match handler
             .upload(source, url, opts, content_type, method, cb)
@@ -233,6 +234,7 @@ pub async fn upload(
 }
 
 /// Single-stream download with retry and exponential backoff
+#[allow(clippy::too_many_arguments)]
 async fn retry_download(
     handler: &dyn ProtocolHandler,
     url: &str,
@@ -241,7 +243,7 @@ async fn retry_download(
     config: &TransferConfig,
     resume_from: Option<u64>,
     retries: &mut u32,
-    progress_cb: Option<Arc<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    progress_cb: Option<ProgressCb>,
 ) -> AftResult<u64> {
     let mut last_err = None;
 
@@ -255,11 +257,10 @@ async fn retry_download(
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
 
-        let cb: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>> =
-            progress_cb.clone().map(|cb| {
-                Box::new(move |bytes: u64, total: Option<u64>| cb(bytes, total))
-                    as Box<dyn Fn(u64, Option<u64>) + Send + Sync>
-            });
+        let cb = progress_cb.clone().map(|cb| {
+            Box::new(move |bytes: u64, total: Option<u64>| cb(bytes, total))
+                as Box<dyn Fn(u64, Option<u64>) + Send + Sync>
+        });
 
         match handler.download(url, dest, opts, resume_from, cb).await {
             Ok(bytes) => return Ok(bytes),
@@ -291,7 +292,7 @@ async fn chunked_download(
     opts: &ProtocolOptions,
     config: &TransferConfig,
     total_size: u64,
-    progress_cb: Option<Arc<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    progress_cb: Option<ProgressCb>,
 ) -> AftResult<u64> {
     if total_size > MAX_DOWNLOAD_SIZE {
         return Err(AftError::TransferFailed(format!(
@@ -300,7 +301,7 @@ async fn chunked_download(
         )));
     }
 
-    let num_chunks = ((total_size + config.chunk_size - 1) / config.chunk_size) as usize;
+    let num_chunks = total_size.div_ceil(config.chunk_size) as usize;
     let chunks: Vec<(u64, u64)> = (0..num_chunks)
         .map(|i| {
             let start = (i as u64).saturating_mul(config.chunk_size);

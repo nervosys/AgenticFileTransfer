@@ -150,7 +150,7 @@ pub async fn decrypt_file(input: &Path, output: &Path, key_file: &Path) -> AftRe
     }
 
     let method = EncryptionMethod::from_byte(data[5])
-        .ok_or_else(|| AftError::Other(format!("Unknown encryption method: {}", data[5])))?;
+        .ok_or_else(|| AftError::CryptoError(format!("Unknown encryption method: {}", data[5])))?;
     let original_len = u64::from_le_bytes([
         data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
     ]);
@@ -166,7 +166,7 @@ pub async fn decrypt_file(input: &Path, output: &Path, key_file: &Path) -> AftRe
 
     let kem_ct_end = HEADER_SIZE + kem_ct_len;
     if data.len() < kem_ct_end {
-        return Err(AftError::Other("File truncated (KEM ciphertext)".into()));
+        return Err(AftError::CryptoError("File truncated (KEM ciphertext)".into()));
     }
     let kem_ct = &data[HEADER_SIZE..kem_ct_end];
     let ciphertext = &data[kem_ct_end..];
