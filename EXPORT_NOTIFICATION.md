@@ -1,8 +1,8 @@
-# EAR §742.15(b) ENC Notification — Draft Email
+# EAR §742.15(b) ENC Notification
 
 > **To:** crypt-supp8@bis.doc.gov, enc@nsa.gov
 >
-> **Subject:** TSR / ENC Notification — AFT (Agentic File Transfer), ECCN 5D002
+> **Subject:** TSR / ENC Notification — AFT (Agentic File Transfer) v1.0.0, ECCN 5D002
 
 Dear Sir/Madam,
 
@@ -10,13 +10,15 @@ Pursuant to §742.15(b) of the Export Administration Regulations (EAR), this ema
 
 ## Product Information
 
-| Field        | Value                                              |
-| ------------ | -------------------------------------------------- |
-| **Product**  | AFT — Agentic File Transfer                        |
-| **Version**  | 0.1.0                                              |
-| **Producer** | Nervosys                                           |
-| **URL**      | https://github.com/nervosys/AgenticFileTransfer    |
-| **License**  | AGPL-3.0-or-later (publicly available open source) |
+| Field            | Value                                                               |
+| ---------------- | ------------------------------------------------------------------- |
+| **Product**      | AFT — Agentic File Transfer                                         |
+| **Version**      | 1.0.0                                                               |
+| **Release Date** | 2026-03-23                                                          |
+| **Producer**     | Nervosys                                                            |
+| **URL**          | https://github.com/nervosys/AgenticFileTransfer                     |
+| **Tag**          | https://github.com/nervosys/AgenticFileTransfer/releases/tag/v1.0.0 |
+| **License**      | AGPL-3.0-or-later (publicly available open source)                  |
 
 ## Cryptographic Functionality
 
@@ -34,15 +36,10 @@ Pursuant to §742.15(b) of the Export Administration Regulations (EAR), this ema
 
 ## Implementation Notes
 
-- Encryption is performed using published, well-known algorithms implemented by
-  open-source Rust libraries (rustls, ring, aes-gcm, pqc_kyber, quinn).
-- The neural network cipher is an experimental trainable autoencoder; it does not
-  implement a novel cryptographic primitive but rather uses standard MLP weights as
-  a symmetric key for a block cipher in OFB/CBC mode.
-- An optional FIPS 140-3 build mode switches the TLS backend to aws-lc-rs
-  (FIPS-validated).
-- No custom hardware, no classified algorithms, no government-furnished cryptographic
-  material.
+- Encryption is performed using published, well-known algorithms implemented by open-source Rust libraries (rustls, ring, aes-gcm, pqc_kyber, quinn).
+- The neural network cipher is an experimental trainable autoencoder; it does not implement a novel cryptographic primitive but rather uses standard MLP weights as a symmetric key for a block cipher in OFB/CBC mode.
+- An optional FIPS 140-3 build mode switches the TLS backend to aws-lc-rs (FIPS-validated).
+- No custom hardware, no classified algorithms, no government-furnished cryptographic material.
 
 ## License Exception
 
