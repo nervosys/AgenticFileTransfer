@@ -222,7 +222,7 @@ aft crypto encrypt -i payload.tar -o payload.enc --method hybrid --key-file ./ke
 aft crypto decrypt -i payload.enc -o payload.tar --key-file ./keys/aft_secret.key
 ```
 
-### DoD classified transfers
+## DoD Classified Transfers
 
 ```bash
 # Transfer with classification enforcement (dod://LEVEL@host/path)
@@ -230,7 +230,7 @@ aft get dod://secret@server.mil/reports/sitrep.pdf -o ./sitrep.pdf
 aft put ./intel.pdf dod://topsecret@server.mil/uploads/intel.pdf
 ```
 
-### Output Schema
+## Output Schema
 
 All operations return a consistent JSON structure:
 
@@ -253,7 +253,7 @@ All operations return a consistent JSON structure:
 }
 ```
 
-### Error Format
+## Error Format
 
 ```json
 {
