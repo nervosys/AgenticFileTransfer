@@ -40,12 +40,11 @@ pub const FRAME_PING: u8 = 0x0D;
 pub const FRAME_PONG: u8 = 0x0E;
 pub const FRAME_AUTH_CHALLENGE: u8 = 0x0F;
 pub const FRAME_AUTH_RESPONSE: u8 = 0x10;
-#[allow(dead_code)]
 pub const FRAME_STREAM_OPEN: u8 = 0x11;
-#[allow(dead_code)]
 pub const FRAME_STREAM_CLOSE: u8 = 0x12;
-#[allow(dead_code)]
 pub const FRAME_STREAM_DATA: u8 = 0x13;
+pub const FRAME_RESUME: u8 = 0x14;
+pub const FRAME_RESUME_ACK: u8 = 0x15;
 
 // Flags
 pub const FLAG_COMPRESSED: u8 = 0x01;
@@ -54,8 +53,10 @@ pub const FLAG_COMPRESSED: u8 = 0x01;
 pub const CAP_COMPRESSION: u32 = 0x01;
 pub const CAP_CHECKSUM: u32 = 0x02;
 pub const CAP_AUTH_CHALLENGE: u32 = 0x04;
-#[allow(dead_code)]
+// Protocol-defined capability bits (CAP_MULTIPLEX reserved for mux feature)
+#[allow(dead_code)] // Protocol spec
 pub const CAP_MULTIPLEX: u32 = 0x08;
+pub const CAP_SESSION_RESUME: u32 = 0x10;
 
 // Defaults
 pub const DEFAULT_PORT: u16 = 2600;
@@ -65,10 +66,10 @@ pub const DEFAULT_MAX_FRAME: u32 = 1_048_576;
 pub const INITIAL_MAX_PAYLOAD: u32 = 65_536;
 
 // Checksum algorithm identifiers in DATA_END
-#[allow(dead_code)]
+#[allow(dead_code)] // Protocol spec — reserved for negotiated checksum selection
 pub const CHECKSUM_NONE: u8 = 0;
 pub const CHECKSUM_SHA256: u8 = 1;
-#[allow(dead_code)]
+#[allow(dead_code)] // Protocol spec — reserved for SHA-512 checksum support
 pub const CHECKSUM_SHA512: u8 = 2;
 
 // Error codes in ERROR frames
@@ -78,6 +79,8 @@ pub const ERR_INVALID_REQUEST: u16 = 3;
 pub const ERR_AUTH_FAILED: u16 = 4;
 pub const ERR_INTERNAL: u16 = 5;
 pub const ERR_IO: u16 = 6;
+#[allow(dead_code)] // Protocol spec — sent by server on resume with expired session
+pub const ERR_SESSION_EXPIRED: u16 = 7;
 
 // ── Frame types ─────────────────────────────────────────────────────────────
 
@@ -227,7 +230,6 @@ pub fn put_str(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(s.as_bytes());
 }
 
-#[allow(dead_code)]
 pub fn put_bytes(buf: &mut Vec<u8>, data: &[u8]) {
     put_u16(buf, data.len() as u16);
     buf.extend_from_slice(data);
@@ -290,7 +292,6 @@ pub fn get_str(buf: &[u8], off: &mut usize) -> AftResult<String> {
     Ok(s)
 }
 
-#[allow(dead_code)]
 pub fn get_bytes(buf: &[u8], off: &mut usize) -> AftResult<Vec<u8>> {
     let len = get_u16(buf, off)? as usize;
     if *off + len > buf.len() {
@@ -303,7 +304,7 @@ pub fn get_bytes(buf: &[u8], off: &mut usize) -> AftResult<Vec<u8>> {
 
 // ── Payload builders ────────────────────────────────────────────────────────
 
-/// Build HELLO payload: [capabilities:4][auth_token_len:2][auth_token:N]
+/// Build HELLO payload: `[capabilities:4][auth_token_len:2][auth_token:N]`
 pub fn build_hello(capabilities: u32, auth_token: Option<&str>) -> Vec<u8> {
     let mut buf = Vec::with_capacity(64);
     put_u32(&mut buf, capabilities);
@@ -311,15 +312,30 @@ pub fn build_hello(capabilities: u32, auth_token: Option<&str>) -> Vec<u8> {
     buf
 }
 
-/// Build HELLO_ACK payload: [capabilities:4][max_frame_size:4]
+/// Build HELLO_ACK payload: `[capabilities:4][max_frame_size:4][session_id_len:2][session_id:N]`
+#[allow(dead_code)] // Public API — used for non-resume connections
 pub fn build_hello_ack(capabilities: u32, max_frame_size: u32) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(8);
+    let mut buf = Vec::with_capacity(12);
     put_u32(&mut buf, capabilities);
     put_u32(&mut buf, max_frame_size);
+    put_str(&mut buf, ""); // no session_id for non-session connections
     buf
 }
 
-/// Build GET payload: [path_len:2][path:N][range_start:8][range_end:8]
+/// Build HELLO_ACK payload with a session ID for resumable connections.
+pub fn build_hello_ack_with_session(
+    capabilities: u32,
+    max_frame_size: u32,
+    session_id: &str,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(12 + session_id.len());
+    put_u32(&mut buf, capabilities);
+    put_u32(&mut buf, max_frame_size);
+    put_str(&mut buf, session_id);
+    buf
+}
+
+/// Build GET payload: `[path_len:2][path:N][range_start:8][range_end:8]`
 pub fn build_get(path: &str, range_start: u64, range_end: u64) -> Vec<u8> {
     let mut buf = Vec::with_capacity(path.len() + 20);
     put_str(&mut buf, path);
@@ -328,14 +344,14 @@ pub fn build_get(path: &str, range_start: u64, range_end: u64) -> Vec<u8> {
     buf
 }
 
-/// Build HEAD payload: [path_len:2][path:N]
+/// Build HEAD payload: `[path_len:2][path:N]`
 pub fn build_head(path: &str) -> Vec<u8> {
     let mut buf = Vec::with_capacity(path.len() + 4);
     put_str(&mut buf, path);
     buf
 }
 
-/// Build HEAD_RESP payload: [file_size:8][modified_secs:8][content_type_len:2][content_type:N]
+/// Build HEAD_RESP payload: `[file_size:8][modified_secs:8][content_type_len:2][content_type:N]`
 pub fn build_head_resp(file_size: u64, modified_secs: u64, content_type: &str) -> Vec<u8> {
     let mut buf = Vec::with_capacity(content_type.len() + 20);
     put_u64(&mut buf, file_size);
@@ -344,7 +360,7 @@ pub fn build_head_resp(file_size: u64, modified_secs: u64, content_type: &str) -
     buf
 }
 
-/// Build PUT payload: [path_len:2][path:N][file_size:8]
+/// Build PUT payload: `[path_len:2][path:N][file_size:8]`
 pub fn build_put(path: &str, file_size: u64) -> Vec<u8> {
     let mut buf = Vec::with_capacity(path.len() + 12);
     put_str(&mut buf, path);
@@ -352,19 +368,19 @@ pub fn build_put(path: &str, file_size: u64) -> Vec<u8> {
     buf
 }
 
-/// Build PUT_ACK payload: [status:1]  (0 = ready, 1 = complete)
+/// Build PUT_ACK payload: `[status:1]`  (0 = ready, 1 = complete)
 pub fn build_put_ack(complete: bool) -> Vec<u8> {
     vec![if complete { 1 } else { 0 }]
 }
 
-/// Build LIST payload: [path_len:2][path:N]
+/// Build LIST payload: `[path_len:2][path:N]`
 pub fn build_list(path: &str) -> Vec<u8> {
     let mut buf = Vec::with_capacity(path.len() + 4);
     put_str(&mut buf, path);
     buf
 }
 
-/// Build DATA_END payload: [total_bytes:8][checksum_algo:1][checksum_len:1][checksum:N]
+/// Build DATA_END payload: `[total_bytes:8][checksum_algo:1][checksum_len:1][checksum:N]`
 pub fn build_data_end(total_bytes: u64, algo: u8, checksum: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(10 + checksum.len());
     put_u64(&mut buf, total_bytes);
@@ -374,7 +390,7 @@ pub fn build_data_end(total_bytes: u64, algo: u8, checksum: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Build ERROR payload: [error_code:2][message_len:2][message:N]
+/// Build ERROR payload: `[error_code:2][message_len:2][message:N]`
 pub fn build_error(code: u16, message: &str) -> Vec<u8> {
     let mut buf = Vec::with_capacity(message.len() + 8);
     put_u16(&mut buf, code);
@@ -402,15 +418,23 @@ pub fn parse_hello(payload: &[u8]) -> AftResult<HelloPayload> {
 pub struct HelloAckPayload {
     pub capabilities: u32,
     pub max_frame_size: u32,
+    pub session_id: String,
 }
 
 pub fn parse_hello_ack(payload: &[u8]) -> AftResult<HelloAckPayload> {
     let mut off = 0;
     let capabilities = get_u32(payload, &mut off)?;
     let max_frame_size = get_u32(payload, &mut off)?;
+    // session_id is optional for backward compatibility
+    let session_id = if off < payload.len() {
+        get_str(payload, &mut off).unwrap_or_default()
+    } else {
+        String::new()
+    };
     Ok(HelloAckPayload {
         capabilities,
         max_frame_size,
+        session_id,
     })
 }
 
@@ -450,7 +474,7 @@ pub fn parse_head_resp(payload: &[u8]) -> AftResult<HeadRespPayload> {
     })
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // Public API — fields consumed by protocol handlers
 pub struct PutPayload {
     pub path: String,
     pub file_size: u64,
@@ -485,7 +509,7 @@ pub fn parse_data_end(payload: &[u8]) -> AftResult<DataEndPayload> {
     })
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // Public API — fields consumed by protocol handlers
 pub struct ErrorPayload {
     pub code: u16,
     pub message: String,
@@ -550,7 +574,7 @@ pub fn build_list_resp(entries: &[ListEntry]) -> Vec<u8> {
 
 // ── Auth frame builders/parsers ─────────────────────────────────────────────
 
-/// Build AUTH_CHALLENGE payload: [nonce_len:2][nonce:N]
+/// Build AUTH_CHALLENGE payload: `[nonce_len:2][nonce:N]`
 pub fn build_auth_challenge(nonce: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(nonce.len() + 2);
     put_bytes(&mut buf, nonce);
@@ -567,7 +591,7 @@ pub fn parse_auth_challenge(payload: &[u8]) -> AftResult<AuthChallengePayload> {
     Ok(AuthChallengePayload { nonce })
 }
 
-/// Build AUTH_RESPONSE payload: [hmac_len:2][hmac:N]
+/// Build AUTH_RESPONSE payload: `[hmac_len:2][hmac:N]`
 pub fn build_auth_response(hmac: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(hmac.len() + 2);
     put_bytes(&mut buf, hmac);
@@ -586,24 +610,21 @@ pub fn parse_auth_response(payload: &[u8]) -> AftResult<AuthResponsePayload> {
 
 // ── Mux frame builders/parsers ──────────────────────────────────────────────
 
-#[allow(dead_code)]
-/// Build STREAM_OPEN payload: [stream_id:2]
+/// Build STREAM_OPEN payload: `[stream_id:2]`
 pub fn build_stream_open(stream_id: u16) -> Vec<u8> {
     let mut buf = Vec::with_capacity(2);
     put_u16(&mut buf, stream_id);
     buf
 }
 
-#[allow(dead_code)]
-/// Build STREAM_CLOSE payload: [stream_id:2]
+/// Build STREAM_CLOSE payload: `[stream_id:2]`
 pub fn build_stream_close(stream_id: u16) -> Vec<u8> {
     let mut buf = Vec::with_capacity(2);
     put_u16(&mut buf, stream_id);
     buf
 }
 
-#[allow(dead_code)]
-/// Build STREAM_DATA payload: [stream_id:2][inner_frame_type:1][data_len:4][data:N]
+/// Build STREAM_DATA payload: `[stream_id:2][inner_frame_type:1][data_len:4][data:N]`
 pub fn build_stream_data(stream_id: u16, inner_frame_type: u8, data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(7 + data.len());
     put_u16(&mut buf, stream_id);
@@ -613,38 +634,32 @@ pub fn build_stream_data(stream_id: u16, inner_frame_type: u8, data: &[u8]) -> V
     buf
 }
 
-#[allow(dead_code)]
 pub struct StreamOpenPayload {
     pub stream_id: u16,
 }
 
-#[allow(dead_code)]
 pub fn parse_stream_open(payload: &[u8]) -> AftResult<StreamOpenPayload> {
     let mut off = 0;
     let stream_id = get_u16(payload, &mut off)?;
     Ok(StreamOpenPayload { stream_id })
 }
 
-#[allow(dead_code)]
 pub struct StreamClosePayload {
     pub stream_id: u16,
 }
 
-#[allow(dead_code)]
 pub fn parse_stream_close(payload: &[u8]) -> AftResult<StreamClosePayload> {
     let mut off = 0;
     let stream_id = get_u16(payload, &mut off)?;
     Ok(StreamClosePayload { stream_id })
 }
 
-#[allow(dead_code)]
 pub struct StreamDataPayload {
     pub stream_id: u16,
     pub inner_frame_type: u8,
     pub data: Vec<u8>,
 }
 
-#[allow(dead_code)]
 pub fn parse_stream_data(payload: &[u8]) -> AftResult<StreamDataPayload> {
     let mut off = 0;
     let stream_id = get_u16(payload, &mut off)?;
@@ -658,5 +673,65 @@ pub fn parse_stream_data(payload: &[u8]) -> AftResult<StreamDataPayload> {
         stream_id,
         inner_frame_type,
         data,
+    })
+}
+
+// ── Session resume frame builders/parsers ───────────────────────────────────
+
+/// Build RESUME payload: `[session_id_len:2][session_id:N][capabilities:4][auth_token_len:2][auth_token:N]`
+pub fn build_resume(session_id: &str, capabilities: u32, auth_token: Option<&str>) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(session_id.len() + 64);
+    put_str(&mut buf, session_id);
+    put_u32(&mut buf, capabilities);
+    put_str(&mut buf, auth_token.unwrap_or(""));
+    buf
+}
+
+#[allow(dead_code)] // Public API — fields consumed by resume handlers
+pub struct ResumePayload {
+    pub session_id: String,
+    pub capabilities: u32,
+    pub auth_token: String,
+}
+
+pub fn parse_resume(payload: &[u8]) -> AftResult<ResumePayload> {
+    let mut off = 0;
+    let session_id = get_str(payload, &mut off)?;
+    let capabilities = get_u32(payload, &mut off)?;
+    let auth_token = get_str(payload, &mut off)?;
+    Ok(ResumePayload {
+        session_id,
+        capabilities,
+        auth_token,
+    })
+}
+
+/// Build RESUME_ACK payload: `[accepted:1][bytes_received:8][path_len:2][path:N]`
+/// If accepted=0, the server rejects the resume (session expired/unknown).
+/// If accepted=1, bytes_received is the amount the server already has for the
+/// in-progress transfer, allowing the client to seek forward and resume.
+pub fn build_resume_ack(accepted: bool, bytes_received: u64, path: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(path.len() + 12);
+    put_u8(&mut buf, if accepted { 1 } else { 0 });
+    put_u64(&mut buf, bytes_received);
+    put_str(&mut buf, path);
+    buf
+}
+
+pub struct ResumeAckPayload {
+    pub accepted: bool,
+    pub bytes_received: u64,
+    pub path: String,
+}
+
+pub fn parse_resume_ack(payload: &[u8]) -> AftResult<ResumeAckPayload> {
+    let mut off = 0;
+    let accepted = get_u8(payload, &mut off)? != 0;
+    let bytes_received = get_u64(payload, &mut off)?;
+    let path = get_str(payload, &mut off)?;
+    Ok(ResumeAckPayload {
+        accepted,
+        bytes_received,
+        path,
     })
 }

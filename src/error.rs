@@ -39,6 +39,12 @@ pub enum AftError {
     #[error("Server returned HTTP {status}: {message}")]
     HttpStatus { status: u16, message: String },
 
+    #[error("Authentication failed: {0}")]
+    AuthFailed(String),
+
+    #[error("Cryptographic operation failed: {0}")]
+    CryptoError(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

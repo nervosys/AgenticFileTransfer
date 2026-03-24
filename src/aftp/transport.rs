@@ -226,7 +226,7 @@ where
                 std::task::Poll::Ready(Ok(()))
             }
             std::task::Poll::Ready(Some(Err(e))) => {
-                std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                std::task::Poll::Ready(Err(std::io::Error::other(e)))
             }
             std::task::Poll::Ready(None) => std::task::Poll::Ready(Ok(())),
             std::task::Poll::Pending => std::task::Poll::Pending,
@@ -262,14 +262,13 @@ where
                 let msg = tokio_tungstenite::tungstenite::Message::Binary(buf.to_vec());
                 match std::pin::Pin::new(&mut self.inner).start_send(msg) {
                     Ok(()) => std::task::Poll::Ready(Ok(buf.len())),
-                    Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    Err(e) => std::task::Poll::Ready(Err(std::io::Error::other(
                         e,
                     ))),
                 }
             }
             std::task::Poll::Ready(Err(e)) => {
-                std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                std::task::Poll::Ready(Err(std::io::Error::other(e)))
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
@@ -282,7 +281,7 @@ where
         match std::pin::Pin::new(&mut self.inner).poll_flush(cx) {
             std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
             std::task::Poll::Ready(Err(e)) => {
-                std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                std::task::Poll::Ready(Err(std::io::Error::other(e)))
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
@@ -295,7 +294,7 @@ where
         match std::pin::Pin::new(&mut self.inner).poll_close(cx) {
             std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
             std::task::Poll::Ready(Err(e)) => {
-                std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                std::task::Poll::Ready(Err(std::io::Error::other(e)))
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }

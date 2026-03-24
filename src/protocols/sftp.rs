@@ -22,6 +22,7 @@ impl SftpHandler {
 }
 
 /// Parse sftp://user:pass@host:port/path
+#[allow(clippy::type_complexity)]
 fn parse_sftp_url(url: &str) -> AftResult<(String, u16, Option<String>, Option<String>, String)> {
     let parsed = url::Url::parse(url)
         .map_err(|e| AftError::InvalidUrl(format!("Invalid SFTP URL: {}", e)))?;
@@ -75,7 +76,7 @@ async fn open_sftp(
     // Determine credentials
     let ssh_user = user
         .or_else(|| opts.basic_auth.as_ref().map(|(u, _)| u.clone()))
-        .unwrap_or_else(|| whoami::username());
+        .unwrap_or_else(whoami::username);
     let ssh_pass = pass.or_else(|| opts.basic_auth.as_ref().map(|(_, p)| p.clone()));
 
     // Try key-based auth first, then password

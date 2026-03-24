@@ -20,6 +20,7 @@ use sha2::Digest;
 
 use cli::{ChecksumAlgorithm, Cli, Command, OutputFormat, PluginAction, TelemetryAction};
 use colored::Colorize;
+use engine::ProgressCb;
 use error::AftResult;
 use output::{Format, OutputResult};
 
@@ -432,7 +433,7 @@ fn extract_filename(url: &str) -> String {
         .ok()
         .and_then(|u| {
             u.path_segments()
-                .and_then(|segs| segs.last())
+                .and_then(|mut segs| segs.next_back())
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty())
         })
@@ -451,6 +452,7 @@ fn algo_to_string(algo: &ChecksumAlgorithm) -> String {
 // Commands
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_get(
     cli: &Cli,
     format: Format,
@@ -503,11 +505,11 @@ async fn cmd_get(
     let total_size = metadata.as_ref().and_then(|m| m.content_length);
     let pb = output::create_progress_bar(total_size, format);
 
-    let progress_cb: Option<Arc<dyn Fn(u64, Option<u64>) + Send + Sync>> = pb.as_ref().map(|pb| {
+    let progress_cb: Option<ProgressCb> = pb.as_ref().map(|pb| {
         let pb = pb.clone();
         Arc::new(move |bytes: u64, _total: Option<u64>| {
             pb.set_position(bytes);
-        }) as Arc<dyn Fn(u64, Option<u64>) + Send + Sync>
+        }) as ProgressCb
     });
 
     let result = engine::download(&*handler, url, &dest, &opts, &config, progress_cb).await;
@@ -535,6 +537,7 @@ async fn cmd_get(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_put(
     cli: &Cli,
     format: Format,
@@ -567,11 +570,11 @@ async fn cmd_put(
     let file_size = tokio::fs::metadata(source_path).await?.len();
     let pb = output::create_progress_bar(Some(file_size), format);
 
-    let progress_cb: Option<Arc<dyn Fn(u64, Option<u64>) + Send + Sync>> = pb.as_ref().map(|pb| {
+    let progress_cb: Option<ProgressCb> = pb.as_ref().map(|pb| {
         let pb = pb.clone();
         Arc::new(move |bytes: u64, _total: Option<u64>| {
             pb.set_position(bytes);
-        }) as Arc<dyn Fn(u64, Option<u64>) + Send + Sync>
+        }) as ProgressCb
     });
 
     let result = engine::upload(
@@ -651,12 +654,12 @@ async fn cmd_copy(
         }
 
         let pb = output::create_progress_bar(None, format);
-        let progress_cb: Option<Arc<dyn Fn(u64, Option<u64>) + Send + Sync>> =
+        let progress_cb: Option<ProgressCb> =
             pb.as_ref().map(|pb| {
                 let pb = pb.clone();
                 Arc::new(move |bytes: u64, _total: Option<u64>| {
                     pb.set_position(bytes);
-                }) as Arc<dyn Fn(u64, Option<u64>) + Send + Sync>
+                }) as ProgressCb
             });
 
         let result = engine::download(
@@ -1113,12 +1116,12 @@ async fn recursive_local_copy(
             } else if file_type.is_file() {
                 let src_str = entry.path().display().to_string();
                 let pb = output::create_progress_bar(None, format);
-                let progress_cb: Option<Arc<dyn Fn(u64, Option<u64>) + Send + Sync>> =
+                let progress_cb: Option<ProgressCb> =
                     pb.as_ref().map(|pb| {
                         let pb = pb.clone();
                         Arc::new(move |bytes: u64, _total: Option<u64>| {
                             pb.set_position(bytes);
-                        }) as Arc<dyn Fn(u64, Option<u64>) + Send + Sync>
+                        }) as ProgressCb
                     });
                 let result =
                     engine::download(&*handler, &src_str, &dest_entry, &opts, config, progress_cb)

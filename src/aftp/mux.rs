@@ -6,9 +6,9 @@
 //! Stream IDs are assigned by the client (odd) or server (even).
 //!
 //! Wire format for mux frames:
-//! - STREAM_OPEN:  [stream_id:2]
-//! - STREAM_CLOSE: [stream_id:2]
-//! - STREAM_DATA:  [stream_id:2][inner_frame_type:1][data_len:4][data:N]
+//! - STREAM_OPEN:  `[stream_id:2]`
+//! - STREAM_CLOSE: `[stream_id:2]`
+//! - STREAM_DATA:  `[stream_id:2][inner_frame_type:1][data_len:4][data:N]`
 
 use std::collections::HashMap;
 use std::sync::Arc;

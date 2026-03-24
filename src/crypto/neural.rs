@@ -1,3 +1,5 @@
+// Matrix multiply loops use explicit indexing for clarity in forward/backward pass
+#![allow(clippy::needless_range_loop)]
 //! Neural Network Encoder-Decoder Cipher.
 //!
 //! A trainable symmetric cipher where the encryption and decryption

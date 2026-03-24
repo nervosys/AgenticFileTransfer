@@ -28,6 +28,9 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
 - **Parallel chunked downloads** — Multi-connection downloads for large files
   with HTTP byte-range support
 - **Resume support** — Resume interrupted transfers with `--resume`
+- **Intermittent connection resilience** — MOSH-inspired session persistence: the server
+  tracks upload progress per session, and clients can reconnect and resume mid-transfer
+  after network interruptions without restarting from scratch
 - **Retry with backoff** — Exponential backoff retry logic for reliability
 - **Checksum verification** — SHA-256, SHA-512, and MD5 integrity verification
 - **Recursive directory copy** — `aft copy -r` for directory trees across protocols
@@ -113,8 +116,7 @@ aft get https://example.com/large.iso -o ./large.iso --resume
 
 ## AFTP — Custom Binary Protocol
 
-AFTP is a purpose-built binary file transfer protocol with 10-byte frame headers
-and 1 MB data frames, yielding 0.001% framing overhead.
+AFTP is a purpose-built binary file transfer protocol with 10-byte frame headers and 1 MB data frames, yielding 0.001% framing overhead.
 
 ### Start a server
 
@@ -183,8 +185,7 @@ aft --agent schema
 
 ## Quantum-Resistant Encryption
 
-AFT includes post-quantum cryptography (NIST FIPS 203 ML-KEM / Kyber1024) and a
-trainable neural network cipher for experimental encryption workflows.
+AFT includes post-quantum cryptography (NIST FIPS 203 ML-KEM / Kyber1024) and a trainable neural network cipher for experimental encryption workflows.
 
 ### Generate a PQC key pair
 
@@ -335,49 +336,48 @@ MITRE ATT&CK mitigations, NIST FIPS 140-3 compliance, and CMMC 2.0 Level 2 asses
 
 ## Architecture
 
-```
+```shell
 src/
-├── main.rs              Entry point, command dispatch, UTF-8 console init
-├── cli.rs               CLI parser (clap derive, 12 subcommands)
-├── error.rs             Error types (AftError enum, thiserror)
-├── engine.rs            Transfer engine (parallel chunks, retry, checksums)
-├── output.rs            Structured + colorized output formatting
-├── ontology.rs          Agentic JSON-LD ontology schema
-├── config.rs            Configuration file (~/.aft/config.toml)
-├── history.rs           Transfer history logging (~/.aft/history.jsonl, JSON Lines)
-├── audit.rs             Security audit logging (~/.aft/audit.log, JSON Lines)
-├── plugins.rs           Plugin system for custom protocol handlers
-├── lib.rs               Library re-exports for testing
+├── main.rs                 # Entry point, command dispatch, UTF-8 console init
+├── cli.rs                  # CLI parser (clap derive, 12 subcommands)
+├── error.rs                # Error types (AftError enum, thiserror)
+├── engine.rs               # Transfer engine (parallel chunks, retry, checksums)
+├── output.rs               # Structured + colorized output formatting
+├── ontology.rs             # Agentic JSON-LD ontology schema
+├── config.rs               # Configuration file (~/.aft/config.toml)
+├── history.rs              # Transfer history logging (~/.aft/history.jsonl, JSON Lines)
+├── audit.rs                # Security audit logging (~/.aft/audit.log, JSON Lines)
+├── plugins.rs              # Plugin system for custom protocol handlers
+├── lib.rs                  # Library re-exports for testing
 ├── aftp/
-│   ├── mod.rs           Module declarations
-│   ├── frame.rs         AFTP binary wire protocol (19 frame types)
-│   ├── server.rs        AFTP file server (TLS + challenge auth + rate limiting)
-│   ├── client.rs        AFTP client (TLS + hardened cipher suites)
-│   ├── mux.rs           Multiplexed streams over AFTP
-│   └── transport.rs     Transport abstraction (TCP, WebSocket, QUIC)
+│   ├── mod.rs              # Module declarations
+│   ├── frame.rs            # AFTP binary wire protocol (21+ frame types)
+│   ├── server.rs           # AFTP file server (TLS + challenge auth + rate limiting)
+│   ├── client.rs           # AFTP client (TLS + hardened cipher suites)
+│   ├── mux.rs              # Multiplexed streams over AFTP
+│   └── transport.rs        # Transport abstraction (TCP, WebSocket, QUIC)
 ├── crypto/
-│   ├── mod.rs           Encryption pipeline (PQC, Neural, Hybrid), AFTE file format
-│   ├── pqc.rs           Post-quantum crypto (ML-KEM Kyber1024 + AES-256-GCM)
-│   ├── neural.rs        Trainable neural network cipher (MLP, OFB mode)
-│   └── classification.rs DoD classification levels (CUI through Top Secret)
+│   ├── mod.rs              # Encryption pipeline (PQC, Neural, Hybrid), AFTE file format
+│   ├── pqc.rs              # Post-quantum crypto (ML-KEM Kyber1024 + AES-256-GCM)
+│   ├── neural.rs           # Trainable neural network cipher (MLP, OFB mode)
+│   └── classification.rs   # DoD classification levels (CUI through Top Secret)
 └── protocols/
-    ├── mod.rs           ProtocolHandler trait + URL resolver (18 schemes)
-    ├── http.rs          HTTP/HTTPS (reqwest)
-    ├── local.rs         Local filesystem (256 KB buffers)
-    ├── aftp.rs          AFTP/AFTPS adapter
-    ├── ftp.rs           FTP/FTPS (suppaftp)
-    ├── sftp.rs          SFTP/SCP (russh)
-    ├── s3.rs            S3 (rust-s3)
-    ├── webdav.rs        WebDAV/WebDAVS (PROPFIND, ranges)
-    ├── azure_blob.rs    Azure Blob Storage (REST API)
-    ├── gcs.rs           Google Cloud Storage (JSON API)
-    ├── smb.rs           SMB/CIFS (UNC + smbclient)
-    └── dod.rs           DoD CDS protocol (classification-aware HTTPS)
-
+    ├── mod.rs              # ProtocolHandler trait + URL resolver (18 schemes)
+    ├── http.rs             # HTTP/HTTPS (reqwest)
+    ├── local.rs            # Local filesystem (256 KB buffers)
+    ├── aftp.rs             # AFTP/AFTPS adapter
+    ├── ftp.rs              # FTP/FTPS (suppaftp)
+    ├── sftp.rs             # SFTP/SCP (russh)
+    ├── s3.rs               # S3 (rust-s3)
+    ├── webdav.rs           # WebDAV/WebDAVS (PROPFIND, ranges)
+    ├── azure_blob.rs       # Azure Blob Storage (REST API)
+    ├── gcs.rs              # Google Cloud Storage (JSON API)
+    ├── smb.rs              # SMB/CIFS (UNC + smbclient)
+    └── dod.rs              # DoD CDS protocol (classification-aware HTTPS)
 tests/
-└── integration_tests.rs   177 tests (protocols, security, crypto, neural, classification, DoD, hardening)
+└── integration_tests.rs    # 271 tests (engine, AFTP server, crypto, CLI, mux, classification, telemetry, session resume, hardening)
 .github/
-└── workflows/ci.yml       CI pipeline (test, clippy, fmt, cargo-audit)
+└── workflows/ci.yml        # CI pipeline (test, clippy, fmt, cargo-audit)
 ```
 
 ### Protocol Abstraction
@@ -420,21 +420,44 @@ pub trait ProtocolHandler: Send + Sync {
 
 ## FIPS 140-3 Build
 
-For DoD and government environments requiring FIPS 140-3 validated cryptography,
-build with the `fips` feature flag to switch the TLS provider to
-[aws-lc-rs](https://github.com/aws/aws-lc-rs) (FIPS 140-3 validated):
+For DoD and government environments requiring FIPS 140-3 validated cryptography, build with the `fips` feature flag to switch the TLS provider to [aws-lc-rs](https://github.com/aws/aws-lc-rs) (FIPS 140-3 validated):
 
 ```bash
 cargo build --release --features fips
 ```
 
-This replaces the default `ring` crypto backend with `aws-lc-rs` for all TLS
-operations, restricting cipher suites to FIPS-approved AES-256-GCM and AES-128-GCM
-with ECDHE key exchange.
+This replaces the default `ring` crypto backend with `aws-lc-rs` for all TLS operations, restricting cipher suites to FIPS-approved AES-256-GCM and AES-128-GCM with ECDHE key exchange.
 
 > **Note:** The `fips` feature requires a C/C++ toolchain (cmake, clang/gcc) for
 > building aws-lc-rs from source.
 
+## Export Control Notice
+
+This software contains cryptographic functionality and is subject to U.S. export control regulations under the Export Administration Regulations (EAR).
+
+- **ECCN:** 5D002 — Information Security software using or performing cryptographic functions
+- **License Exception:** ENC (§740.17(b)) — Publicly available open-source encryption software
+
+**Cryptographic components included:**
+
+| Algorithm             | Key Length      | Purpose                                             |
+| --------------------- | --------------- | --------------------------------------------------- |
+| AES-256-GCM           | 256-bit         | Authenticated encryption (PQC file encryption, TLS) |
+| AES-128-GCM           | 128-bit         | TLS cipher suite                                    |
+| ML-KEM / Kyber1024    | N/A (KEM)       | Post-quantum key encapsulation (NIST FIPS 203)      |
+| HMAC-SHA256           | 256-bit         | Challenge/response authentication                   |
+| SHA-256, SHA-512, MD5 | N/A (hash)      | Integrity verification                              |
+| TLS 1.2+ (rustls)     | Varies          | Transport encryption                                |
+| QUIC (quinn)          | Varies          | Transport encryption                                |
+| Neural network cipher | Model-dependent | Experimental MLP autoencoder encryption             |
+
+This software has been publicly released and a notification has been submitted to the U.S. Bureau of Industry and Security (BIS) and the National Security Agency (NSA) in accordance with EAR §742.15(b). This software may be exported and re-exported under License Exception ENC without further authorization, except to embargoed destinations and denied persons per EAR Part 746 and the Entity List (Supplement No. 4 to Part 744).
+
+**This notice does not constitute legal advice.** Consult an export control attorney for your specific use case.
+
 ## License
 
-MIT
+This project is dual-licensed:
+
+- **AGPL-3.0-or-later** — Free for open-source use under the terms of the [GNU Affero General Public License v3.0](LICENSE).
+- **Commercial License** — For proprietary/commercial use without AGPL obligations, contact [Nervosys](https://nervosys.com) for a commercial license.

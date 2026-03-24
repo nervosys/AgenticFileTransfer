@@ -216,7 +216,7 @@ fn print_text_result(result: &OutputResult) {
             } else {
                 entry.name.normal().to_string()
             };
-            let size = entry.size.map(|s| format_bytes(s)).unwrap_or_default();
+            let size = entry.size.map(format_bytes).unwrap_or_default();
             let modified = entry.last_modified.as_deref().unwrap_or("");
             println!(
                 "    {} {:40} {:>10}  {}",

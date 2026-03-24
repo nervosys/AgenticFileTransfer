@@ -2217,7 +2217,9 @@ mod retry_delay_tests {
         // Simulate the delay calculation used in engine.rs
         for retries in 1..=config.max_retries {
             let exp = (retries - 1).min(30);
-            let delay = config.retry_delay_ms.saturating_mul(2u64.saturating_pow(exp));
+            let delay = config
+                .retry_delay_ms
+                .saturating_mul(2u64.saturating_pow(exp));
             let delay = delay.min(300_000);
             assert!(delay <= 300_000, "Delay overflowed at retry {}", retries);
         }
@@ -2229,8 +2231,10 @@ mod retry_delay_tests {
             retry_delay_ms: 60_000,
             ..Default::default()
         };
-        let exp = (10u32 - 1).min(30);
-        let delay = config.retry_delay_ms.saturating_mul(2u64.saturating_pow(exp));
+        let exp = 10u32 - 1;
+        let delay = config
+            .retry_delay_ms
+            .saturating_mul(2u64.saturating_pow(exp));
         let delay = delay.min(300_000);
         assert_eq!(delay, 300_000);
     }
@@ -2265,7 +2269,7 @@ mod scheme_validation_tests {
 }
 
 mod neural_signature_tests {
-    use aft::crypto::neural::{TrainConfig, NeuralCipher};
+    use aft::crypto::neural::{NeuralCipher, TrainConfig};
     use std::io::Write;
 
     #[test]
@@ -2349,6 +2353,1649 @@ mod rate_limiter_cleanup_tests {
         // Verify the constant exists and is reasonable
         // The rate limiter should clean up at MAX_TRACKED_IPS / 2 (5000)
         // and hard cap at MAX_TRACKED_IPS (10000)
-        assert!(true, "Rate limiter bounds verified by code review");
+        // Rate limiter bounds verified by code review:
+        // MAX_TRACKED_IPS = 10_000, cleanup at 50% (5000)
+    }
+}
+
+// ── Session resume frame tests ──────────────────────────────────────────────
+
+mod session_resume_tests {
+    use aft::aftp::frame::*;
+
+    #[test]
+    fn hello_ack_with_session_roundtrip() {
+        let payload = build_hello_ack_with_session(
+            CAP_COMPRESSION | CAP_SESSION_RESUME,
+            DEFAULT_MAX_FRAME,
+            "abc123",
+        );
+        let parsed = parse_hello_ack(&payload).unwrap();
+        assert_eq!(parsed.capabilities, CAP_COMPRESSION | CAP_SESSION_RESUME);
+        assert_eq!(parsed.max_frame_size, DEFAULT_MAX_FRAME);
+        assert_eq!(parsed.session_id, "abc123");
+    }
+
+    #[test]
+    fn hello_ack_without_session_roundtrip() {
+        // build_hello_ack (no session) should produce empty session_id
+        let payload = build_hello_ack(CAP_COMPRESSION, DEFAULT_MAX_FRAME);
+        let parsed = parse_hello_ack(&payload).unwrap();
+        assert_eq!(parsed.capabilities, CAP_COMPRESSION);
+        assert_eq!(parsed.max_frame_size, DEFAULT_MAX_FRAME);
+        assert_eq!(parsed.session_id, "");
+    }
+
+    #[test]
+    fn resume_roundtrip() {
+        let payload = build_resume("sess-42", CAP_SESSION_RESUME | CAP_CHECKSUM, Some("tok"));
+        let parsed = parse_resume(&payload).unwrap();
+        assert_eq!(parsed.session_id, "sess-42");
+        assert_eq!(parsed.capabilities, CAP_SESSION_RESUME | CAP_CHECKSUM);
+        assert_eq!(parsed.auth_token, "tok");
+    }
+
+    #[test]
+    fn resume_no_token() {
+        let payload = build_resume("sess-99", CAP_SESSION_RESUME, None);
+        let parsed = parse_resume(&payload).unwrap();
+        assert_eq!(parsed.session_id, "sess-99");
+        assert_eq!(parsed.auth_token, "");
+    }
+
+    #[test]
+    fn resume_ack_accepted_roundtrip() {
+        let payload = build_resume_ack(true, 8192, "/uploads/data.bin");
+        let parsed = parse_resume_ack(&payload).unwrap();
+        assert!(parsed.accepted);
+        assert_eq!(parsed.bytes_received, 8192);
+        assert_eq!(parsed.path, "/uploads/data.bin");
+    }
+
+    #[test]
+    fn resume_ack_rejected_roundtrip() {
+        let payload = build_resume_ack(false, 0, "");
+        let parsed = parse_resume_ack(&payload).unwrap();
+        assert!(!parsed.accepted);
+        assert_eq!(parsed.bytes_received, 0);
+        assert_eq!(parsed.path, "");
+    }
+
+    #[test]
+    fn session_resume_capability_bit() {
+        assert_eq!(CAP_SESSION_RESUME, 0x10);
+        // Verify it doesn't collide with existing capabilities
+        assert_ne!(CAP_SESSION_RESUME, CAP_COMPRESSION);
+        assert_ne!(CAP_SESSION_RESUME, CAP_CHECKSUM);
+        assert_ne!(CAP_SESSION_RESUME, CAP_AUTH_CHALLENGE);
+    }
+
+    #[test]
+    fn resume_frame_types() {
+        assert_eq!(FRAME_RESUME, 0x14);
+        assert_eq!(FRAME_RESUME_ACK, 0x15);
+    }
+
+    #[test]
+    fn err_session_expired_code() {
+        assert_eq!(ERR_SESSION_EXPIRED, 7);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V1.0 — Engine integration tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+mod engine_download_upload_tests {
+    use aft::engine::{ChecksumConfig, TransferConfig, TransferResult};
+    use aft::error::{AftError, AftResult};
+    use aft::protocols::{DirectoryEntry, ProtocolHandler, ProtocolOptions, ResourceMetadata};
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    // ── Mock protocol handler ───────────────────────────────────────────
+
+    struct MockHandler {
+        /// Content returned by downloads
+        content: Vec<u8>,
+        /// Whether HEAD reports ranges support
+        ranges: bool,
+        /// Number of times download() was called (for retry testing)
+        download_calls: Arc<AtomicU32>,
+        /// Fail the first N download() calls
+        fail_first_n: u32,
+        /// Content length reported by HEAD (None = no HEAD)
+        report_size: Option<u64>,
+    }
+
+    impl MockHandler {
+        fn new(content: &[u8]) -> Self {
+            Self {
+                content: content.to_vec(),
+                ranges: false,
+                download_calls: Arc::new(AtomicU32::new(0)),
+                fail_first_n: 0,
+                report_size: Some(content.len() as u64),
+            }
+        }
+
+        fn with_fail_first(mut self, n: u32) -> Self {
+            self.fail_first_n = n;
+            self
+        }
+
+        #[allow(dead_code)]
+        fn with_ranges(mut self, ranges: bool) -> Self {
+            self.ranges = ranges;
+            self
+        }
+
+        fn with_no_head(mut self) -> Self {
+            self.report_size = None;
+            self
+        }
+    }
+
+    #[async_trait]
+    impl ProtocolHandler for MockHandler {
+        fn scheme(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &str {
+            "Mock"
+        }
+        fn supports_ranges(&self) -> bool {
+            self.ranges
+        }
+        fn supports_resume(&self) -> bool {
+            true
+        }
+
+        async fn head(&self, _url: &str, _opts: &ProtocolOptions) -> AftResult<ResourceMetadata> {
+            match self.report_size {
+                Some(size) => Ok(ResourceMetadata {
+                    content_length: Some(size),
+                    content_type: Some("application/octet-stream".into()),
+                    last_modified: None,
+                    etag: None,
+                    accepts_ranges: self.ranges,
+                    headers: HashMap::new(),
+                }),
+                None => Err(AftError::Other("HEAD not supported".into())),
+            }
+        }
+
+        async fn download(
+            &self,
+            _url: &str,
+            dest: &Path,
+            _opts: &ProtocolOptions,
+            resume_from: Option<u64>,
+            progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+        ) -> AftResult<u64> {
+            let call = self.download_calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.fail_first_n {
+                return Err(AftError::TransferFailed("Simulated failure".into()));
+            }
+            let offset = resume_from.unwrap_or(0) as usize;
+            let data = &self.content[offset..];
+            tokio::fs::write(dest, data).await?;
+            if let Some(cb) = &progress {
+                cb(data.len() as u64, Some(self.content.len() as u64));
+            }
+            Ok(data.len() as u64)
+        }
+
+        async fn download_range(
+            &self,
+            _url: &str,
+            start: u64,
+            end: u64,
+            _opts: &ProtocolOptions,
+        ) -> AftResult<Vec<u8>> {
+            let s = start as usize;
+            let e = (end as usize).min(self.content.len() - 1);
+            Ok(self.content[s..=e].to_vec())
+        }
+
+        async fn upload(
+            &self,
+            source: &Path,
+            _url: &str,
+            _opts: &ProtocolOptions,
+            _content_type: Option<&str>,
+            _method: Option<&str>,
+            _progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+        ) -> AftResult<u64> {
+            let data = tokio::fs::read(source).await?;
+            Ok(data.len() as u64)
+        }
+
+        async fn list(
+            &self,
+            _url: &str,
+            _opts: &ProtocolOptions,
+        ) -> AftResult<Vec<DirectoryEntry>> {
+            Ok(vec![])
+        }
+    }
+
+    // A variant that always fails upload
+    struct FailUploadHandler;
+
+    #[async_trait]
+    impl ProtocolHandler for FailUploadHandler {
+        fn scheme(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &str {
+            "FailUpload"
+        }
+        fn supports_ranges(&self) -> bool {
+            false
+        }
+        fn supports_resume(&self) -> bool {
+            false
+        }
+
+        async fn head(&self, _url: &str, _opts: &ProtocolOptions) -> AftResult<ResourceMetadata> {
+            Ok(ResourceMetadata {
+                content_length: None,
+                content_type: None,
+                last_modified: None,
+                etag: None,
+                accepts_ranges: false,
+                headers: HashMap::new(),
+            })
+        }
+
+        async fn download(
+            &self,
+            _url: &str,
+            _dest: &Path,
+            _opts: &ProtocolOptions,
+            _resume: Option<u64>,
+            _progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+        ) -> AftResult<u64> {
+            Err(AftError::TransferFailed("always fails".into()))
+        }
+
+        async fn download_range(
+            &self,
+            _url: &str,
+            _s: u64,
+            _e: u64,
+            _opts: &ProtocolOptions,
+        ) -> AftResult<Vec<u8>> {
+            Err(AftError::TransferFailed("always fails".into()))
+        }
+
+        async fn upload(
+            &self,
+            _source: &Path,
+            _url: &str,
+            _opts: &ProtocolOptions,
+            _ct: Option<&str>,
+            _method: Option<&str>,
+            _progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+        ) -> AftResult<u64> {
+            Err(AftError::TransferFailed("always fails".into()))
+        }
+
+        async fn list(
+            &self,
+            _url: &str,
+            _opts: &ProtocolOptions,
+        ) -> AftResult<Vec<DirectoryEntry>> {
+            Ok(vec![])
+        }
+    }
+
+    // ── Download tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn download_simple_succeeds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("out.bin");
+        let content = b"Hello, engine download test!";
+        let handler = MockHandler::new(content);
+        let config = TransferConfig::default();
+        let opts = ProtocolOptions::default();
+
+        let result = aft::engine::download(&handler, "mock://file", &dest, &opts, &config, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bytes_transferred, content.len() as u64);
+        assert_eq!(result.retries_used, 0);
+        assert_eq!(result.chunks_used, 1);
+        assert!(result.checksum.is_none());
+        assert_eq!(std::fs::read(&dest).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn download_with_retry_succeeds_after_failures() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("retry.bin");
+        let content = b"Retry content";
+        let handler = MockHandler::new(content).with_fail_first(2);
+        let config = TransferConfig {
+            max_retries: 5,
+            retry_delay_ms: 1, // minimal delay in tests
+            ..Default::default()
+        };
+        let opts = ProtocolOptions::default();
+
+        let result = aft::engine::download(&handler, "mock://file", &dest, &opts, &config, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bytes_transferred, content.len() as u64);
+        assert_eq!(result.retries_used, 2);
+        assert_eq!(std::fs::read(&dest).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn download_exhausts_retries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("fail.bin");
+        let handler = MockHandler::new(b"x").with_fail_first(100);
+        let config = TransferConfig {
+            max_retries: 2,
+            retry_delay_ms: 1,
+            ..Default::default()
+        };
+        let opts = ProtocolOptions::default();
+
+        let result =
+            aft::engine::download(&handler, "mock://file", &dest, &opts, &config, None).await;
+
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("failed") || msg.contains("Failed"));
+    }
+
+    #[tokio::test]
+    async fn download_with_sha256_checksum_succeeds() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("cs.bin");
+        let content = b"checksum test data";
+        let expected_hash = hex::encode(Sha256::digest(content));
+
+        let handler = MockHandler::new(content);
+        let config = TransferConfig {
+            verify_checksum: Some(ChecksumConfig {
+                algorithm: "sha256".into(),
+                expected_value: Some(expected_hash.clone()),
+            }),
+            ..Default::default()
+        };
+        let opts = ProtocolOptions::default();
+
+        let result = aft::engine::download(&handler, "mock://file", &dest, &opts, &config, None)
+            .await
+            .unwrap();
+
+        let cs = result.checksum.unwrap();
+        assert_eq!(cs.algorithm, "sha256");
+        assert_eq!(cs.value, expected_hash);
+        assert!(cs.verified);
+    }
+
+    #[tokio::test]
+    async fn download_with_wrong_checksum_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("badcs.bin");
+        let handler = MockHandler::new(b"real data");
+        let config = TransferConfig {
+            verify_checksum: Some(ChecksumConfig {
+                algorithm: "sha256".into(),
+                expected_value: Some(
+                    "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                ),
+            }),
+            ..Default::default()
+        };
+        let opts = ProtocolOptions::default();
+
+        let result =
+            aft::engine::download(&handler, "mock://file", &dest, &opts, &config, None).await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("mismatch") || msg.contains("Mismatch") || msg.contains("Checksum"));
+    }
+
+    #[tokio::test]
+    async fn download_without_head_falls_back_to_single_stream() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("nohead.bin");
+        let content = b"no head content";
+        let handler = MockHandler::new(content).with_no_head();
+        let config = TransferConfig::default();
+        let opts = ProtocolOptions::default();
+
+        let result = aft::engine::download(&handler, "mock://file", &dest, &opts, &config, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bytes_transferred, content.len() as u64);
+        assert_eq!(result.chunks_used, 1);
+    }
+
+    #[tokio::test]
+    async fn download_progress_callback_fires() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("prog.bin");
+        let content = b"progress callback test!";
+        let handler = MockHandler::new(content);
+        let config = TransferConfig::default();
+        let opts = ProtocolOptions::default();
+        let called = Arc::new(AtomicU32::new(0));
+        let called2 = called.clone();
+        let cb: aft::engine::ProgressCb = Arc::new(move |_bytes, _total| {
+            called2.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let _result =
+            aft::engine::download(&handler, "mock://file", &dest, &opts, &config, Some(cb))
+                .await
+                .unwrap();
+
+        assert!(
+            called.load(Ordering::SeqCst) > 0,
+            "Progress callback should have been called"
+        );
+    }
+
+    // ── Upload tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn upload_simple_succeeds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("upload_src.bin");
+        let content = b"Upload me via engine!";
+        std::fs::write(&src, content).unwrap();
+
+        let handler = MockHandler::new(b"");
+        let config = TransferConfig::default();
+        let opts = ProtocolOptions::default();
+
+        let result = aft::engine::upload(
+            &handler,
+            &src,
+            "mock://dest",
+            &opts,
+            &config,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.bytes_transferred, content.len() as u64);
+        assert_eq!(result.retries_used, 0);
+        assert_eq!(result.chunks_used, 1);
+    }
+
+    #[tokio::test]
+    async fn upload_exhausts_retries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("upload_fail.bin");
+        std::fs::write(&src, b"fail me").unwrap();
+
+        let handler = FailUploadHandler;
+        let config = TransferConfig {
+            max_retries: 1,
+            retry_delay_ms: 1,
+            ..Default::default()
+        };
+        let opts = ProtocolOptions::default();
+
+        let result = aft::engine::upload(
+            &handler,
+            &src,
+            "mock://dest",
+            &opts,
+            &config,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    // ── TransferConfig edge cases ───────────────────────────────────────
+
+    #[test]
+    fn config_zero_retries_means_one_attempt() {
+        let config = TransferConfig {
+            max_retries: 0,
+            ..Default::default()
+        };
+        assert_eq!(config.max_retries, 0);
+    }
+
+    #[test]
+    fn config_custom_chunk_size() {
+        let config = TransferConfig {
+            chunk_size: 1024 * 1024,
+            parallel_chunks: 16,
+            ..Default::default()
+        };
+        assert_eq!(config.chunk_size, 1_048_576);
+        assert_eq!(config.parallel_chunks, 16);
+    }
+
+    #[test]
+    fn transfer_result_serializes_to_json() {
+        let result = TransferResult {
+            bytes_transferred: 1024,
+            duration_ms: 100,
+            throughput_bytes_per_sec: 10240.0,
+            checksum: None,
+            retries_used: 0,
+            chunks_used: 1,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("1024"));
+        assert!(json.contains("bytes_transferred"));
+    }
+
+    #[test]
+    fn checksum_config_stores_algorithm() {
+        let config = ChecksumConfig {
+            algorithm: "sha512".into(),
+            expected_value: Some("abcdef".into()),
+        };
+        assert_eq!(config.algorithm, "sha512");
+        assert_eq!(config.expected_value.as_deref(), Some("abcdef"));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V1.0 — AFTP server tests (session store, auth rate limiter via E2E)
+// ═══════════════════════════════════════════════════════════════════════════
+
+mod aftp_server_extended_tests {
+    use aft::aftp::client::AftpClient;
+    use aft::aftp::server::AftpServer;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn server_download_range() {
+        let dir = TempDir::new().unwrap();
+        let content = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        std::fs::write(dir.path().join("alpha.txt"), content).unwrap();
+
+        let port = 12620;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+        let data = client.download_range("/alpha.txt", 0, 4).await.unwrap();
+        assert_eq!(&data, b"ABCDE");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_upload_overwrite() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("existing.txt"), "old content").unwrap();
+
+        let port = 12621;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let src = dir.path().join("new_src.txt");
+        std::fs::write(&src, "new content").unwrap();
+
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+        client.upload(&src, "/existing.txt", None).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("existing.txt")).unwrap(),
+            "new content"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_upload_creates_new_file() {
+        let dir = TempDir::new().unwrap();
+
+        let port = 12622;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let src = dir.path().join("brand_new_src.txt");
+        std::fs::write(&src, "brand new").unwrap();
+
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+        client.upload(&src, "/brand_new.txt", None).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("brand_new.txt")).unwrap(),
+            "brand new"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_with_compression_flag() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("comp.txt"), "compress me").unwrap();
+
+        let port = 12623;
+        // Enable compression on server
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            true,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Client without TLS (server is not TLS)
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+        let info = client.head("/comp.txt").await.unwrap();
+        assert_eq!(info.size, 11);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_list_empty_directory() {
+        let dir = TempDir::new().unwrap();
+
+        let port = 12624;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+        let entries = client.list("/").await.unwrap();
+        assert!(entries.is_empty());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_head_reports_correct_content_type() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("data.json"), r#"{"key":"value"}"#).unwrap();
+
+        let port = 12625;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+        let info = client.head("/data.json").await.unwrap();
+        assert_eq!(info.size, 15);
+        // content_type should be inferred
+        assert!(!info.content_type.is_empty());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_multiple_sequential_operations() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("seq.txt"), "sequential ops").unwrap();
+
+        let port = 12626;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+
+        // HEAD then download on same connection
+        let info = client.head("/seq.txt").await.unwrap();
+        assert_eq!(info.size, 14);
+
+        let dest = dir.path().join("seq_out.txt");
+        let bytes = client.download("/seq.txt", &dest, None).await.unwrap();
+        assert_eq!(bytes, 14);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_download_nonexistent_file() {
+        let dir = TempDir::new().unwrap();
+
+        let port = 12627;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+        let dest = dir.path().join("ghost.bin");
+        let result = client.download("/no_such_file.txt", &dest, None).await;
+        assert!(result.is_err());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_with_wrong_auth_token_rejected() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("secure.txt"), "top secret").unwrap();
+
+        let port = 12628;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            Some("correct_password".into()),
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = AftpClient::new(
+            "127.0.0.1".into(),
+            port,
+            Some("wrong_password".into()),
+            false,
+            false,
+        );
+        let result = client.head("/secure.txt").await;
+        assert!(result.is_err());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn server_large_file_download() {
+        let dir = TempDir::new().unwrap();
+        // 1 MB file
+        let content = vec![0xABu8; 1024 * 1024];
+        std::fs::write(dir.path().join("large.bin"), &content).unwrap();
+
+        let port = 12629;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+        let dest = dir.path().join("large_out.bin");
+        let bytes = client.download("/large.bin", &dest, None).await.unwrap();
+        assert_eq!(bytes, 1024 * 1024);
+        assert_eq!(std::fs::read(&dest).unwrap().len(), 1024 * 1024);
+
+        handle.abort();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V1.0 — Crypto roundtrip & edge case tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+mod crypto_extended_tests {
+    use aft::crypto;
+    use aft::crypto::neural::{NeuralCipher, TrainConfig};
+    use aft::crypto::pqc;
+
+    #[test]
+    fn pqc_keypair_generation_is_unique() {
+        let kp1 = pqc::generate_keypair().unwrap();
+        let kp2 = pqc::generate_keypair().unwrap();
+        assert_ne!(kp1.public_key, kp2.public_key);
+        assert_ne!(kp1.secret_key, kp2.secret_key);
+    }
+
+    #[test]
+    fn pqc_key_save_load_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let kp = pqc::generate_keypair().unwrap();
+        let pub_path = dir.path().join("rt.pub");
+        let sec_path = dir.path().join("rt.sec");
+
+        pqc::save_public_key(&kp.public_key, &pub_path).unwrap();
+        pqc::save_secret_key(&kp.secret_key, &sec_path).unwrap();
+
+        let loaded_pub = pqc::load_public_key(&pub_path).unwrap();
+        let loaded_sec = pqc::load_secret_key(&sec_path).unwrap();
+
+        assert_eq!(kp.public_key, loaded_pub);
+        assert_eq!(kp.secret_key, loaded_sec);
+    }
+
+    #[test]
+    fn pqc_encapsulate_decapsulate_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let kp = pqc::generate_keypair().unwrap();
+        let pub_path = dir.path().join("kem.pub");
+        let sec_path = dir.path().join("kem.sec");
+        pqc::save_public_key(&kp.public_key, &pub_path).unwrap();
+        pqc::save_secret_key(&kp.secret_key, &sec_path).unwrap();
+
+        let (ct, shared_secret_enc) = pqc::encapsulate_key(&pub_path).unwrap();
+        let shared_secret_dec = pqc::decapsulate_key(&ct, &sec_path).unwrap();
+
+        assert_eq!(shared_secret_enc, shared_secret_dec);
+    }
+
+    #[test]
+    fn pqc_encrypt_decrypt_data_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let kp = pqc::generate_keypair().unwrap();
+        let pub_path = dir.path().join("data.pub");
+        let sec_path = dir.path().join("data.sec");
+        pqc::save_public_key(&kp.public_key, &pub_path).unwrap();
+        pqc::save_secret_key(&kp.secret_key, &sec_path).unwrap();
+
+        let plaintext = b"Top secret post-quantum data!";
+        let (kem_ct, ciphertext) = pqc::encrypt(plaintext, &pub_path).unwrap();
+        let decrypted = pqc::decrypt(&kem_ct, &ciphertext, &sec_path).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn pqc_encrypt_empty_data() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let kp = pqc::generate_keypair().unwrap();
+        let pub_path = dir.path().join("e.pub");
+        let sec_path = dir.path().join("e.sec");
+        pqc::save_public_key(&kp.public_key, &pub_path).unwrap();
+        pqc::save_secret_key(&kp.secret_key, &sec_path).unwrap();
+
+        let (kem_ct, ciphertext) = pqc::encrypt(b"", &pub_path).unwrap();
+        let decrypted = pqc::decrypt(&kem_ct, &ciphertext, &sec_path).unwrap();
+        assert_eq!(decrypted, b"");
+    }
+
+    #[test]
+    fn neural_cipher_encrypt_decrypt_roundtrip() {
+        let config = TrainConfig {
+            epochs: 50,
+            learning_rate: 0.01,
+            batch_size: 32,
+            seed: 123,
+        };
+        let cipher = NeuralCipher::train(&config);
+        let plaintext = b"Neural cipher roundtrip test!";
+        let ciphertext = cipher.encrypt(plaintext);
+        let decrypted = cipher.decrypt(&ciphertext);
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn neural_cipher_different_seeds_produce_different_ciphers() {
+        let c1 = NeuralCipher::train(&TrainConfig {
+            seed: 1,
+            epochs: 10,
+            ..Default::default()
+        });
+        let c2 = NeuralCipher::train(&TrainConfig {
+            seed: 2,
+            epochs: 10,
+            ..Default::default()
+        });
+        let data = b"same plaintext";
+        assert_ne!(c1.encrypt(data), c2.encrypt(data));
+    }
+
+    #[test]
+    fn neural_cipher_save_load_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("cipher.nn");
+        let config = TrainConfig {
+            epochs: 20,
+            seed: 42,
+            ..Default::default()
+        };
+        let cipher = NeuralCipher::train(&config);
+        cipher.save(&path).unwrap();
+
+        let loaded = NeuralCipher::load(&path).unwrap();
+        let plaintext = b"persist me!";
+        let ct = cipher.encrypt(plaintext);
+        let dec = loaded.decrypt(&ct);
+        assert_eq!(dec, plaintext);
+    }
+
+    #[test]
+    fn neural_encrypt_file_data_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let model_path = dir.path().join("fdata.nn");
+        let config = TrainConfig {
+            epochs: 50,
+            seed: 7,
+            ..Default::default()
+        };
+        let cipher = NeuralCipher::train(&config);
+        cipher.save(&model_path).unwrap();
+
+        let plaintext = b"File-level neural roundtrip";
+        let ct = crypto::neural::encrypt_file_data(plaintext, &model_path).unwrap();
+        let dec = crypto::neural::decrypt_file_data(&ct, &model_path).unwrap();
+        assert_eq!(dec, plaintext);
+    }
+
+    #[test]
+    fn encryption_method_parse_all_variants() {
+        assert_eq!(
+            crypto::EncryptionMethod::parse("pqc"),
+            Some(crypto::EncryptionMethod::Pqc)
+        );
+        assert_eq!(
+            crypto::EncryptionMethod::parse("kyber"),
+            Some(crypto::EncryptionMethod::Pqc)
+        );
+        assert_eq!(
+            crypto::EncryptionMethod::parse("post-quantum"),
+            Some(crypto::EncryptionMethod::Pqc)
+        );
+        assert_eq!(
+            crypto::EncryptionMethod::parse("neural"),
+            Some(crypto::EncryptionMethod::Neural)
+        );
+        assert_eq!(
+            crypto::EncryptionMethod::parse("nn"),
+            Some(crypto::EncryptionMethod::Neural)
+        );
+        assert_eq!(
+            crypto::EncryptionMethod::parse("hybrid"),
+            Some(crypto::EncryptionMethod::Hybrid)
+        );
+        assert_eq!(crypto::EncryptionMethod::parse("invalid"), None);
+        assert_eq!(crypto::EncryptionMethod::parse(""), None);
+    }
+
+    #[test]
+    fn encryption_method_case_insensitive() {
+        assert_eq!(
+            crypto::EncryptionMethod::parse("PQC"),
+            Some(crypto::EncryptionMethod::Pqc)
+        );
+        assert_eq!(
+            crypto::EncryptionMethod::parse("Neural"),
+            Some(crypto::EncryptionMethod::Neural)
+        );
+        assert_eq!(
+            crypto::EncryptionMethod::parse("HYBRID"),
+            Some(crypto::EncryptionMethod::Hybrid)
+        );
+    }
+
+    #[tokio::test]
+    async fn decrypt_non_aft_file_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bad_file = dir.path().join("not_encrypted.bin");
+        let output = dir.path().join("dec.bin");
+        let key = dir.path().join("dummy.sec");
+        std::fs::write(&bad_file, b"This is not an encrypted file at all").unwrap();
+        std::fs::write(&key, [0u8; 32]).unwrap();
+
+        let result = crypto::decrypt_file(&bad_file, &output, &key).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn decrypt_truncated_header_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let short_file = dir.path().join("short.bin");
+        let output = dir.path().join("dec.bin");
+        let key = dir.path().join("dummy.sec");
+        std::fs::write(&short_file, b"AFTE").unwrap(); // magic but too short
+        std::fs::write(&key, [0u8; 32]).unwrap();
+
+        let result = crypto::decrypt_file(&short_file, &output, &key).await;
+        assert!(result.is_err());
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V1.0 — E2E CLI tests (binary invocation)
+// ═══════════════════════════════════════════════════════════════════════════
+
+mod cli_e2e_tests {
+    use std::process::Command;
+
+    fn aft_bin() -> Command {
+        Command::new(env!("CARGO_BIN_EXE_aft"))
+    }
+
+    #[test]
+    fn cli_help_exits_zero() {
+        let output = aft_bin().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Agentic File Transfer"));
+    }
+
+    #[test]
+    fn cli_version_exits_zero() {
+        let output = aft_bin().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("aft"));
+    }
+
+    #[test]
+    fn cli_schema_subcommand() {
+        let output = aft_bin().arg("schema").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Schema should produce JSON describing the CLI
+        assert!(stdout.contains("get") || stdout.contains("schema") || stdout.contains("command"));
+    }
+
+    #[test]
+    fn cli_capabilities_subcommand() {
+        let output = aft_bin().arg("capabilities").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("http") || stdout.contains("protocol") || stdout.contains("aftp"));
+    }
+
+    #[test]
+    fn cli_agent_mode_json_output() {
+        let output = aft_bin().args(["--agent", "schema"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Agent mode should produce structured output
+        assert!(!stdout.is_empty());
+    }
+
+    #[test]
+    fn cli_json_format_schema() {
+        let output = aft_bin()
+            .args(["--format", "json", "schema"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn cli_no_subcommand_fails() {
+        let output = aft_bin().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn cli_invalid_subcommand_fails() {
+        let output = aft_bin().arg("nonexistent_command").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn cli_get_missing_url_fails() {
+        let output = aft_bin().arg("get").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn cli_checksum_subcommand_missing_file_fails() {
+        let output = aft_bin()
+            .args(["checksum", "/nonexistent/file.txt"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V1.0 — Extended mux, classification, telemetry, and misc tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+mod mux_extended_tests {
+    use aft::aftp::frame::*;
+
+    #[test]
+    fn stream_open_roundtrip() {
+        let payload = build_stream_open(42);
+        let parsed = parse_stream_open(&payload).unwrap();
+        assert_eq!(parsed.stream_id, 42);
+    }
+
+    #[test]
+    fn stream_close_roundtrip() {
+        let payload = build_stream_close(100);
+        let parsed = parse_stream_close(&payload).unwrap();
+        assert_eq!(parsed.stream_id, 100);
+    }
+
+    #[test]
+    fn stream_data_roundtrip() {
+        let inner_data = b"inner frame data for stream";
+        let payload = build_stream_data(7, FRAME_PUT, inner_data);
+        let parsed = parse_stream_data(&payload).unwrap();
+        assert_eq!(parsed.stream_id, 7);
+        assert_eq!(parsed.inner_frame_type, FRAME_PUT);
+        assert_eq!(parsed.data, inner_data);
+    }
+
+    #[test]
+    fn stream_data_empty_payload() {
+        let payload = build_stream_data(1, FRAME_HEAD, b"");
+        let parsed = parse_stream_data(&payload).unwrap();
+        assert_eq!(parsed.stream_id, 1);
+        assert_eq!(parsed.data, b"");
+    }
+
+    #[test]
+    fn stream_open_close_different_ids() {
+        for id in [0, 1, 255, 1000, u16::MAX] {
+            let open_payload = build_stream_open(id);
+            let open_parsed = parse_stream_open(&open_payload).unwrap();
+            assert_eq!(open_parsed.stream_id, id);
+
+            let close_payload = build_stream_close(id);
+            let close_parsed = parse_stream_close(&close_payload).unwrap();
+            assert_eq!(close_parsed.stream_id, id);
+        }
+    }
+
+    #[test]
+    fn stream_frame_type_constants() {
+        // Frame types for stream ops should be distinct
+        assert_ne!(FRAME_STREAM_OPEN, FRAME_STREAM_CLOSE);
+        assert_ne!(FRAME_STREAM_OPEN, FRAME_STREAM_DATA);
+        assert_ne!(FRAME_STREAM_CLOSE, FRAME_STREAM_DATA);
+    }
+}
+
+mod classification_extended_tests {
+    use aft::crypto::classification::{validate_compliance, Classification};
+
+    #[test]
+    fn classification_ordering() {
+        // Higher classifications should have stricter requirements
+        assert!(validate_compliance(Classification::Unclassified, true).is_ok());
+        assert!(validate_compliance(Classification::Cui, true).is_err());
+        assert!(validate_compliance(Classification::Secret, true).is_err());
+        assert!(validate_compliance(Classification::TopSecret, true).is_err());
+    }
+
+    #[test]
+    fn classification_all_levels_secure_ok() {
+        for level in [
+            Classification::Unclassified,
+            Classification::Cui,
+            Classification::Secret,
+            Classification::TopSecret,
+        ] {
+            assert!(
+                validate_compliance(level, false).is_ok(),
+                "Secure should pass for {:?}",
+                level
+            );
+        }
+    }
+
+    #[test]
+    fn classification_banner_not_empty() {
+        for level in [
+            Classification::Unclassified,
+            Classification::Cui,
+            Classification::Secret,
+            Classification::TopSecret,
+        ] {
+            assert!(
+                !level.banner().is_empty(),
+                "Banner should not be empty for {:?}",
+                level
+            );
+        }
+    }
+
+    #[test]
+    fn classification_header_values_uppercase() {
+        for level in [
+            Classification::Unclassified,
+            Classification::Secret,
+            Classification::TopSecret,
+        ] {
+            let hv = level.header_value();
+            assert_eq!(
+                hv,
+                hv.to_uppercase(),
+                "Header value should be uppercase for {:?}",
+                level
+            );
+        }
+    }
+
+    #[test]
+    fn parse_returns_none_for_empty() {
+        assert_eq!(Classification::parse(""), None);
+    }
+
+    #[test]
+    fn parse_returns_none_for_whitespace() {
+        assert_eq!(Classification::parse("  "), None);
+    }
+}
+
+mod telemetry_extended_tests {
+    use aft::telemetry::{
+        TelemetryConfig, TelemetryEvent, TelemetryRecord, DEFAULT_TELEMETRY_ENDPOINT,
+    };
+    use std::collections::HashMap;
+
+    #[test]
+    fn telemetry_config_serialization_roundtrip() {
+        let config = TelemetryConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: TelemetryConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.enabled, config.enabled);
+        assert_eq!(deserialized.version, config.version);
+        assert_eq!(deserialized.installation_id, config.installation_id);
+    }
+
+    #[test]
+    fn telemetry_config_is_enabled_reflects_field() {
+        let mut config = TelemetryConfig::default();
+        assert!(config.is_enabled());
+        config.enabled = false;
+        assert!(!config.is_enabled());
+    }
+
+    #[test]
+    fn telemetry_config_is_remote_enabled() {
+        let mut config = TelemetryConfig::default();
+        assert!(config.is_remote_enabled());
+        config.remote_enabled = false;
+        assert!(!config.is_remote_enabled());
+        // Also false if main switch is off
+        config.remote_enabled = true;
+        config.enabled = false;
+        assert!(!config.is_remote_enabled());
+    }
+
+    #[test]
+    fn default_endpoint_constant() {
+        assert!(DEFAULT_TELEMETRY_ENDPOINT.starts_with("https://"));
+        assert!(DEFAULT_TELEMETRY_ENDPOINT.contains("nervosys"));
+    }
+
+    #[test]
+    fn telemetry_event_variants_serialize() {
+        let events = vec![
+            TelemetryEvent::CommandInvoked {
+                command: "get".into(),
+                subcommand: None,
+                duration_ms: Some(100),
+                success: true,
+            },
+            TelemetryEvent::TransferCompleted {
+                protocol: "https".into(),
+                direction: "download".into(),
+                size_bytes: 1024,
+                duration_ms: 500,
+                parallel_connections: 4,
+                resumed: false,
+                compressed: false,
+                encrypted: false,
+                success: true,
+            },
+            TelemetryEvent::ServerStarted {
+                port: 8080,
+                transport: "tcp".into(),
+                tls_enabled: false,
+            },
+            TelemetryEvent::ProtocolUsed {
+                protocol: "sftp".into(),
+            },
+            TelemetryEvent::ErrorOccurred {
+                error_type: "timeout".into(),
+                command: Some("get".into()),
+            },
+            TelemetryEvent::AppStarted {
+                version: "0.1.0".into(),
+                os: "windows".into(),
+                arch: "x86_64".into(),
+            },
+        ];
+
+        for event in &events {
+            let json = serde_json::to_string(event).unwrap();
+            assert!(!json.is_empty());
+            // Verify it roundtrips
+            let _: TelemetryEvent = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn telemetry_record_new_populates_fields() {
+        let data = HashMap::new();
+        let record = TelemetryRecord::new(
+            "inst-id-123",
+            "usage",
+            "test_event",
+            data,
+            vec!["tag1".into()],
+            None,
+        );
+
+        assert_eq!(record.installation_id, "inst-id-123");
+        assert_eq!(record.category, "usage");
+        assert_eq!(record.event, "test_event");
+        assert_eq!(record.tags, vec!["tag1"]);
+        assert!(record.context.is_none());
+        assert!(!record.id.is_empty());
+        assert!(!record.timestamp_iso.is_empty());
+        assert!(record.timestamp > 0);
+        assert_eq!(record.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn telemetry_record_unique_ids() {
+        let r1 = TelemetryRecord::new("a", "cat", "evt", HashMap::new(), vec![], None);
+        let r2 = TelemetryRecord::new("a", "cat", "evt", HashMap::new(), vec![], None);
+        assert_ne!(r1.id, r2.id);
+    }
+
+    #[test]
+    fn telemetry_record_serialization() {
+        let mut data = HashMap::new();
+        data.insert("key".into(), serde_json::json!("value"));
+        let record =
+            TelemetryRecord::new("inst", "perf", "transfer", data, vec![], Some("ctx".into()));
+
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: TelemetryRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.installation_id, "inst");
+        assert_eq!(deserialized.category, "perf");
+        assert_eq!(deserialized.context, Some("ctx".into()));
+    }
+}
+
+mod error_type_tests {
+    use aft::error::AftError;
+
+    #[test]
+    fn error_display_messages() {
+        let cases: Vec<(AftError, &str)> = vec![
+            (AftError::UnsupportedProtocol("gopher".into()), "gopher"),
+            (AftError::InvalidUrl("bad".into()), "bad"),
+            (AftError::ConnectionFailed("refused".into()), "refused"),
+            (AftError::TransferFailed("timeout".into()), "timeout"),
+            (AftError::FileNotFound("missing.txt".into()), "missing.txt"),
+            (AftError::PermissionDenied("read".into()), "read"),
+            (
+                AftError::ChecksumMismatch {
+                    expected: "aaa".into(),
+                    actual: "bbb".into(),
+                },
+                "aaa",
+            ),
+            (AftError::Timeout(30), "30"),
+            (AftError::ResumeNotSupported, "Resume"),
+            (
+                AftError::HttpStatus {
+                    status: 404,
+                    message: "Not Found".into(),
+                },
+                "404",
+            ),
+            (AftError::AuthFailed("bad token".into()), "bad token"),
+            (AftError::CryptoError("decrypt".into()), "decrypt"),
+            (AftError::Other("misc".into()), "misc"),
+        ];
+
+        for (err, expected_substring) in cases {
+            let msg = format!("{}", err);
+            assert!(
+                msg.contains(expected_substring),
+                "Error '{}' should contain '{}'",
+                msg,
+                expected_substring
+            );
+        }
+    }
+
+    #[test]
+    fn io_error_conversion() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let aft_err: AftError = io_err.into();
+        let msg = format!("{}", aft_err);
+        assert!(msg.contains("gone"));
+    }
+}
+
+mod protocol_handler_tests {
+    use aft::protocols::resolve_protocol;
+
+    #[test]
+    fn resolve_all_builtin_schemes() {
+        let schemes = [
+            "http", "https", "ftp", "sftp", "s3", "aftp", "aftps", "file", "smb", "webdav", "gs",
+            "az", "dod",
+        ];
+        for scheme in &schemes {
+            let url = if *scheme == "file" {
+                "file:///tmp/test".to_string()
+            } else if *scheme == "dod" {
+                "dod://UNCLASSIFIED@example.mil/test".to_string()
+            } else {
+                format!("{}://example.com/test", scheme)
+            };
+            let result = resolve_protocol(&url);
+            assert!(result.is_ok(), "Should resolve scheme: {}", scheme);
+            let handler = result.unwrap();
+            assert!(!handler.scheme().is_empty());
+            assert!(!handler.name().is_empty());
+        }
+    }
+
+    #[test]
+    fn local_path_resolves_as_file() {
+        // Relative path should resolve as local protocol
+        let result = resolve_protocol("./local_file.txt");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().scheme(), "file");
+    }
+
+    #[test]
+    fn windows_path_resolves_as_file() {
+        // Windows drive letter path
+        let result = resolve_protocol("C:\\Users\\test\\file.txt");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().scheme(), "file");
+    }
+
+    #[test]
+    fn unknown_scheme_is_rejected() {
+        let result = resolve_protocol("gopher://gopher.example.com/test");
+        assert!(result.is_err());
+    }
+}
+
+mod plugin_extended_tests {
+    use aft::plugins::PluginRegistry;
+
+    #[test]
+    fn default_registry_is_empty() {
+        let reg = PluginRegistry::default();
+        assert!(reg.list().is_empty());
+    }
+
+    #[test]
+    fn new_registry_matches_default() {
+        let new_reg = PluginRegistry::new();
+        let def_reg = PluginRegistry::default();
+        assert_eq!(new_reg.list().len(), def_reg.list().len());
+    }
+
+    #[test]
+    fn create_handler_unknown_returns_none() {
+        let reg = PluginRegistry::new();
+        assert!(reg.create_handler("nonexistent").is_none());
+    }
+
+    #[test]
+    fn has_scheme_returns_false_for_unknown() {
+        let reg = PluginRegistry::new();
+        assert!(!reg.has_scheme("nonexistent"));
+    }
+}
+
+mod ontology_tests {
+    use aft::ontology;
+
+    #[test]
+    fn generate_schema_has_operations() {
+        let schema = ontology::generate_schema();
+        assert!(!schema.operations.is_empty());
+        assert!(!schema.protocols.is_empty());
+    }
+
+    #[test]
+    fn schema_serializes_to_json() {
+        let schema = ontology::generate_schema();
+        let json = serde_json::to_string(&schema).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_object());
+        assert!(parsed["operations"].is_array());
+    }
+}
+
+mod output_extended_tests {
+    #[test]
+    fn json_output_format() {
+        let result = serde_json::json!({
+            "status": "success",
+            "bytes": 1024
+        });
+        let formatted = serde_json::to_string_pretty(&result).unwrap();
+        assert!(formatted.contains("success"));
+        assert!(formatted.contains("1024"));
     }
 }

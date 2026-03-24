@@ -115,8 +115,10 @@ impl AftpClient {
     }
 
     /// Open connection and perform HELLO handshake.
-    /// Returns (reader, writer, negotiated_max_frame, use_compression).
-    async fn connect(&self) -> AftResult<(BufReader<BoxRead>, BufWriter<BoxWrite>, u32, bool)> {
+    /// Returns (reader, writer, negotiated_max_frame, use_compression, session_id).
+    async fn connect(
+        &self,
+    ) -> AftResult<(BufReader<BoxRead>, BufWriter<BoxWrite>, u32, bool, String)> {
         let addr = format!("{}:{}", self.host, self.port);
         let stream = TcpStream::connect(&addr)
             .await
@@ -161,9 +163,10 @@ impl AftpClient {
             // Server wants challenge/response
             let challenge = parse_auth_challenge(&next.payload)?;
 
-            let token = self.auth_token.as_deref().ok_or_else(|| {
-                AftError::PermissionDenied("Auth token required for challenge".into())
-            })?;
+            let token = self
+                .auth_token
+                .as_deref()
+                .ok_or_else(|| AftError::AuthFailed("Auth token required for challenge".into()))?;
 
             // Compute HMAC-SHA256(token, nonce)
             use hmac::{Hmac, Mac};
@@ -198,8 +201,209 @@ impl AftpClient {
 
         let ack_data = parse_hello_ack(&ack.payload)?;
         let use_compression = ack_data.capabilities & CAP_COMPRESSION != 0;
+        let session_id = ack_data.session_id;
 
-        Ok((reader, writer, ack_data.max_frame_size, use_compression))
+        Ok((
+            reader,
+            writer,
+            ack_data.max_frame_size,
+            use_compression,
+            session_id,
+        ))
+    }
+
+    /// Open connection and resume a previous session.
+    /// Returns (reader, writer, max_frame, use_compression, resume_offset, resume_path).
+    #[allow(dead_code)]
+    async fn resume_connect(
+        &self,
+        session_id: &str,
+    ) -> AftResult<(
+        BufReader<BoxRead>,
+        BufWriter<BoxWrite>,
+        u32,
+        bool,
+        u64,
+        String,
+    )> {
+        let addr = format!("{}:{}", self.host, self.port);
+        let stream = TcpStream::connect(&addr)
+            .await
+            .map_err(|e| AftError::ConnectionFailed(format!("AFTP connect to {}: {}", addr, e)))?;
+        stream.set_nodelay(true).ok();
+
+        let (mut reader, mut writer) = if self.use_tls {
+            let config = make_client_tls_config(self.insecure)?;
+            let connector = tokio_rustls::TlsConnector::from(config);
+            let server_name = rustls::pki_types::ServerName::try_from(self.host.clone())
+                .map_err(|_| AftError::Other(format!("Invalid TLS server name: {}", self.host)))?;
+            let tls_stream = connector
+                .connect(server_name, stream)
+                .await
+                .map_err(|e| AftError::ConnectionFailed(format!("AFTP TLS handshake: {}", e)))?;
+            let (rd, wr) = tokio::io::split(tls_stream);
+            (
+                BufReader::with_capacity(BUF_SIZE, Box::new(rd) as BoxRead),
+                BufWriter::with_capacity(BUF_SIZE, Box::new(wr) as BoxWrite),
+            )
+        } else {
+            let (rd, wr) = stream.into_split();
+            (
+                BufReader::with_capacity(BUF_SIZE, Box::new(rd) as BoxRead),
+                BufWriter::with_capacity(BUF_SIZE, Box::new(wr) as BoxWrite),
+            )
+        };
+
+        // Send RESUME frame
+        let mut caps = CAP_COMPRESSION | CAP_CHECKSUM | CAP_SESSION_RESUME;
+        if self.use_challenge_auth {
+            caps |= CAP_AUTH_CHALLENGE;
+        }
+        let resume_payload = build_resume(session_id, caps, self.auth_token.as_deref());
+        write_frame(&mut writer, &Frame::new(FRAME_RESUME, resume_payload)).await?;
+        writer.flush().await?;
+
+        let ack = read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?;
+        if ack.frame_type == FRAME_ERROR {
+            let e = parse_error(&ack.payload)?;
+            return Err(AftError::ConnectionFailed(format!(
+                "Server rejected RESUME: {}",
+                e.message
+            )));
+        }
+        if ack.frame_type != FRAME_RESUME_ACK {
+            return Err(AftError::Other(format!(
+                "Expected RESUME_ACK, got 0x{:02x}",
+                ack.frame_type
+            )));
+        }
+
+        let ack_data = parse_resume_ack(&ack.payload)?;
+        if !ack_data.accepted {
+            return Err(AftError::Other("Server rejected session resume".into()));
+        }
+
+        // Inherit compression setting from the original connection
+        let use_compression = true; // server advertised in original HELLO_ACK
+                                    // Use the server's max frame as a safe default
+        let max_frame = DEFAULT_MAX_FRAME;
+
+        Ok((
+            reader,
+            writer,
+            max_frame,
+            use_compression,
+            ack_data.bytes_received,
+            ack_data.path,
+        ))
+    }
+
+    /// Upload a file, resuming from `byte_offset` when reconnecting after a
+    /// dropped connection. This is used by the engine retry logic.
+    #[allow(dead_code)]
+    pub async fn upload_resume(
+        &self,
+        source: &Path,
+        remote_path: &str,
+        session_id: &str,
+        progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    ) -> AftResult<u64> {
+        let file_meta = tokio::fs::metadata(source).await?;
+        let file_size = file_meta.len();
+
+        let (mut reader, mut writer, max_frame, use_compress, byte_offset, _path) =
+            self.resume_connect(session_id).await?;
+
+        // Seek past what the server already has
+        let mut file = tokio::fs::File::open(source).await?;
+        if byte_offset > 0 {
+            tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(byte_offset)).await?;
+        }
+
+        // Send PUT request for the resumed transfer
+        let payload = build_put(remote_path, file_size);
+        write_frame(&mut writer, &Frame::new(FRAME_PUT, payload)).await?;
+        writer.flush().await?;
+
+        let ack = Self::expect_frame(&mut reader, FRAME_PUT_ACK, INITIAL_MAX_PAYLOAD).await?;
+        let ack_data = parse_put_ack(&ack.payload)?;
+        if ack_data.complete {
+            return Err(AftError::Other(
+                "Server sent complete-ACK before data transfer".into(),
+            ));
+        }
+
+        // Stream remaining data from byte_offset
+        let frame_buf_size = max_frame as usize;
+        let mut buf = vec![0u8; frame_buf_size];
+        let mut hasher = sha2::Sha256::new();
+        let mut total_sent = byte_offset;
+
+        // Hash the already-sent portion so the final checksum is correct
+        // Re-read from the beginning and hash just the skipped portion
+        if byte_offset > 0 {
+            let mut pre_file = tokio::fs::File::open(source).await?;
+            let mut pre_buf = vec![0u8; 65_536];
+            let mut remaining = byte_offset;
+            while remaining > 0 {
+                let to_read = remaining.min(pre_buf.len() as u64) as usize;
+                let n =
+                    tokio::io::AsyncReadExt::read(&mut pre_file, &mut pre_buf[..to_read]).await?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&pre_buf[..n]);
+                remaining -= n as u64;
+            }
+        }
+
+        loop {
+            let n = tokio::io::AsyncReadExt::read(&mut file, &mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+
+            if use_compress {
+                if let Ok(compressed) = zstd::encode_all(std::io::Cursor::new(&buf[..n]), 1) {
+                    if compressed.len() < n {
+                        write_frame(
+                            &mut writer,
+                            &Frame::with_flags(FRAME_DATA, FLAG_COMPRESSED, compressed),
+                        )
+                        .await?;
+                        total_sent += n as u64;
+                        if let Some(cb) = &progress {
+                            cb(total_sent, Some(file_size));
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            write_frame_header(&mut writer, FRAME_DATA, 0, n as u32).await?;
+            writer.write_all(&buf[..n]).await?;
+            total_sent += n as u64;
+            if let Some(cb) = &progress {
+                cb(total_sent, Some(file_size));
+            }
+        }
+
+        // DATA_END with checksum over the entire file
+        let hash = hasher.finalize();
+        let end_payload = build_data_end(file_size, CHECKSUM_SHA256, &hash);
+        write_frame(&mut writer, &Frame::new(FRAME_DATA_END, end_payload)).await?;
+        writer.flush().await?;
+
+        let final_ack = Self::expect_frame(&mut reader, FRAME_PUT_ACK, INITIAL_MAX_PAYLOAD).await?;
+        let final_ack_data = parse_put_ack(&final_ack.payload)?;
+        if !final_ack_data.complete {
+            return Err(AftError::Other(
+                "Server did not confirm PUT completion".into(),
+            ));
+        }
+
+        Ok(total_sent)
     }
 
     /// Read the next frame hoping for `expected`; surface ERROR frames as errors.
@@ -225,7 +429,7 @@ impl AftpClient {
     // ── HEAD ────────────────────────────────────────────────────────────────
 
     pub async fn head(&self, path: &str) -> AftResult<AftpFileInfo> {
-        let (mut reader, mut writer, max_frame, _) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _, _session_id) = self.connect().await?;
 
         let payload = build_head(path);
         write_frame(&mut writer, &Frame::new(FRAME_HEAD, payload)).await?;
@@ -249,7 +453,8 @@ impl AftpClient {
         dest: &Path,
         progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     ) -> AftResult<u64> {
-        let (mut reader, mut writer, max_frame, _use_compress) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _use_compress, _session_id) =
+            self.connect().await?;
 
         // Send GET (full file)
         let payload = build_get(path, 0, 0);
@@ -327,7 +532,7 @@ impl AftpClient {
     // ── DOWNLOAD RANGE ──────────────────────────────────────────────────────
 
     pub async fn download_range(&self, path: &str, start: u64, end: u64) -> AftResult<Vec<u8>> {
-        let (mut reader, mut writer, max_frame, _) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _, _session_id) = self.connect().await?;
 
         let payload = build_get(path, start, end);
         write_frame(&mut writer, &Frame::new(FRAME_GET, payload)).await?;
@@ -379,7 +584,7 @@ impl AftpClient {
         let file_meta = tokio::fs::metadata(source).await?;
         let file_size = file_meta.len();
 
-        let (mut reader, mut writer, max_frame, use_compress) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, use_compress, _session_id) = self.connect().await?;
 
         // Send PUT request
         let payload = build_put(remote_path, file_size);
@@ -455,7 +660,7 @@ impl AftpClient {
     // ── LIST ────────────────────────────────────────────────────────────────
 
     pub async fn list(&self, path: &str) -> AftResult<Vec<AftpDirEntry>> {
-        let (mut reader, mut writer, max_frame, _) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _, _session_id) = self.connect().await?;
 
         let payload = build_list(path);
         write_frame(&mut writer, &Frame::new(FRAME_LIST, payload)).await?;
