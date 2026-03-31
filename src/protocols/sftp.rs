@@ -54,7 +54,10 @@ impl client::Handler for SshHandler {
         &mut self,
         _server_public_key: &key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // Accept all host keys (similar to ssh -o StrictHostKeyChecking=no)
+        // WARNING: Host key verification is not yet implemented.
+        // This is equivalent to StrictHostKeyChecking=no and is vulnerable to MITM.
+        // TODO(security): implement known_hosts checking (~/.ssh/known_hosts)
+        eprintln!("\x1b[33mWARNING: SSH host key verification is disabled — MITM risk\x1b[0m");
         Ok(true)
     }
 }

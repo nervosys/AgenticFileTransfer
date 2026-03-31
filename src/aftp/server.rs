@@ -639,6 +639,16 @@ where
 {
     let resume_data = parse_resume(&resume_frame.payload)?;
 
+    // Verify auth token on resume (defense-in-depth: session + IP + token)
+    if let Some(ref expected_token) = state.auth_token {
+        if resume_data.auth_token != *expected_token {
+            let ack = build_resume_ack(false, 0, "");
+            write_frame(writer, &Frame::new(FRAME_RESUME_ACK, ack)).await?;
+            writer.flush().await?;
+            return Err(AftError::AuthFailed("Invalid auth token on resume".into()));
+        }
+    }
+
     let (accepted, resume_offset, last_path) = {
         let mut store = state.sessions.lock().await;
         match store.get(&resume_data.session_id, &addr.ip()) {

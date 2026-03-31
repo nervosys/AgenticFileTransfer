@@ -40,7 +40,7 @@ pub fn generate_keypair() -> AftResult<PqcKeyPair> {
     })
 }
 
-/// Save a public key to a file.
+/// Save a public key to a file (atomic write).
 pub fn save_public_key(key: &[u8], path: &Path) -> AftResult<()> {
     let mut data = Vec::with_capacity(12 + key.len());
     data.extend_from_slice(PUB_KEY_MAGIC);
@@ -48,15 +48,12 @@ pub fn save_public_key(key: &[u8], path: &Path) -> AftResult<()> {
     data.push(ALGORITHM_KYBER1024);
     data.extend_from_slice(&[0u8; 2]); // reserved
     data.extend_from_slice(&(key.len() as u32).to_le_bytes());
+    data.extend_from_slice(key);
     std::fs::write(path, &data)?;
-    // Append key bytes separately to avoid double-allocation
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
-    f.write_all(key)?;
     Ok(())
 }
 
-/// Save a secret key to a file.
+/// Save a secret key to a file (atomic write with restricted permissions).
 pub fn save_secret_key(key: &[u8], path: &Path) -> AftResult<()> {
     let mut data = Vec::with_capacity(12 + key.len());
     data.extend_from_slice(SEC_KEY_MAGIC);
@@ -64,10 +61,14 @@ pub fn save_secret_key(key: &[u8], path: &Path) -> AftResult<()> {
     data.push(ALGORITHM_KYBER1024);
     data.extend_from_slice(&[0u8; 2]); // reserved
     data.extend_from_slice(&(key.len() as u32).to_le_bytes());
+    data.extend_from_slice(key);
     std::fs::write(path, &data)?;
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
-    f.write_all(key)?;
+    // Restrict permissions on Unix (owner read/write only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -75,12 +76,9 @@ pub fn save_secret_key(key: &[u8], path: &Path) -> AftResult<()> {
 pub fn load_public_key(path: &Path) -> AftResult<Vec<u8>> {
     let data = std::fs::read(path)?;
     if data.len() < 12 || &data[..4] != PUB_KEY_MAGIC {
-        return Err(AftError::Other(
-            "Not an AFT public key file".into(),
-        ));
+        return Err(AftError::Other("Not an AFT public key file".into()));
     }
-    let key_len =
-        u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+    let key_len = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
     if data.len() < 12 + key_len {
         return Err(AftError::Other("Public key file truncated".into()));
     }
@@ -91,12 +89,9 @@ pub fn load_public_key(path: &Path) -> AftResult<Vec<u8>> {
 pub fn load_secret_key(path: &Path) -> AftResult<Vec<u8>> {
     let data = std::fs::read(path)?;
     if data.len() < 12 || &data[..4] != SEC_KEY_MAGIC {
-        return Err(AftError::Other(
-            "Not an AFT secret key file".into(),
-        ));
+        return Err(AftError::Other("Not an AFT secret key file".into()));
     }
-    let key_len =
-        u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+    let key_len = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
     if data.len() < 12 + key_len {
         return Err(AftError::Other("Secret key file truncated".into()));
     }
@@ -135,11 +130,7 @@ pub fn encrypt(plaintext: &[u8], pub_key_path: &Path) -> AftResult<(Vec<u8>, Vec
 }
 
 /// Decrypt data using Kyber1024 KEM + AES-256-GCM.
-pub fn decrypt(
-    kem_ct: &[u8],
-    encrypted: &[u8],
-    sec_key_path: &Path,
-) -> AftResult<Vec<u8>> {
+pub fn decrypt(kem_ct: &[u8], encrypted: &[u8], sec_key_path: &Path) -> AftResult<Vec<u8>> {
     let sec_key = load_secret_key(sec_key_path)?;
 
     // KEM decapsulate → recover shared secret
@@ -151,7 +142,9 @@ pub fn decrypt(
         .map_err(|e| AftError::CryptoError(format!("AES key error: {}", e)))?;
 
     if encrypted.len() < 12 {
-        return Err(AftError::CryptoError("Encrypted data too short for nonce".into()));
+        return Err(AftError::CryptoError(
+            "Encrypted data too short for nonce".into(),
+        ));
     }
     let nonce = Nonce::from_slice(&encrypted[..12]);
     let ciphertext = &encrypted[12..];
