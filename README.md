@@ -43,7 +43,7 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
 - **CI/CD** — GitHub Actions pipeline with test, clippy, fmt, and cargo-audit
 - **Multiplexed streams** — Concurrent transfers over a single AFTP connection
 - **Cross-platform** — Windows, macOS, and Linux
-- **8.3 MB binary** — LTO, stripped, single codegen unit, panic=abort
+- **~9 MB binary** — LTO, stripped, single codegen unit, panic=abort
 
 ## Installation
 
@@ -416,7 +416,7 @@ pub trait ProtocolHandler: Send + Sync {
 - **256 KB I/O buffers** — Tuned buffer sizes for local file operations
 - **1 MB AFTP frames** — 0.001% framing overhead at maximum frame size
 - **Connection pooling** — reqwest's built-in pool for HTTP
-- **Release profile** — LTO, single codegen unit, stripped, panic=abort (8.3 MB)
+- **Release profile** — LTO, single codegen unit, stripped, panic=abort (~9 MB)
 
 ## FIPS 140-3 Build
 
