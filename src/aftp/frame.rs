@@ -226,11 +226,21 @@ pub fn put_u64(buf: &mut Vec<u8>, val: u64) {
 }
 
 pub fn put_str(buf: &mut Vec<u8>, s: &str) {
+    assert!(
+        s.len() <= u16::MAX as usize,
+        "put_str: string length {} exceeds u16::MAX",
+        s.len()
+    );
     put_u16(buf, s.len() as u16);
     buf.extend_from_slice(s.as_bytes());
 }
 
 pub fn put_bytes(buf: &mut Vec<u8>, data: &[u8]) {
+    assert!(
+        data.len() <= u16::MAX as usize,
+        "put_bytes: data length {} exceeds u16::MAX",
+        data.len()
+    );
     put_u16(buf, data.len() as u16);
     buf.extend_from_slice(data);
 }
@@ -544,7 +554,10 @@ pub struct ListEntry {
 pub fn parse_list_resp(payload: &[u8]) -> AftResult<Vec<ListEntry>> {
     let mut off = 0;
     let count = get_u32(payload, &mut off)? as usize;
-    let mut entries = Vec::with_capacity(count);
+    // Cap allocation to prevent OOM from malicious count values.
+    // Each list entry is at least 19 bytes (2+1 name + 8 size + 1 is_dir + 8 mtime).
+    let max_entries = (payload.len() - off) / 19;
+    let mut entries = Vec::with_capacity(count.min(max_entries));
     for _ in 0..count {
         let name = get_str(payload, &mut off)?;
         let size = get_u64(payload, &mut off)?;

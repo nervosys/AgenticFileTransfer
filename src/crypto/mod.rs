@@ -88,12 +88,17 @@ pub async fn encrypt_file(
         EncryptionMethod::Hybrid => {
             // PQC key exchange → shared secret → deterministic neural cipher
             let (kem_ct, shared_secret) = pqc::encapsulate_key(key_file)?;
-            // Derive a deterministic neural cipher from shared secret
+            // Derive a full-entropy seed via HMAC-SHA256(shared_secret, "aft-neural-seed")
+            use hmac::{Hmac, Mac};
+            type HmacSha256 = Hmac<sha2::Sha256>;
+            let mut mac = HmacSha256::new_from_slice(&shared_secret)
+                .map_err(|_| AftError::CryptoError("HMAC key init failed".into()))?;
+            mac.update(b"aft-neural-seed");
+            let derived = mac.finalize().into_bytes();
             let seed = u64::from_le_bytes(
-                shared_secret.get(..8)
-                    .ok_or_else(|| AftError::Other("Shared secret too short for seed derivation".into()))?
+                derived[..8]
                     .try_into()
-                    .map_err(|_| AftError::Other("Shared secret slice conversion failed".into()))?,
+                    .map_err(|_| AftError::CryptoError("Seed derivation failed".into()))?,
             );
             let cipher = neural::NeuralCipher::train(&neural::TrainConfig {
                 epochs: 100,
@@ -166,7 +171,9 @@ pub async fn decrypt_file(input: &Path, output: &Path, key_file: &Path) -> AftRe
 
     let kem_ct_end = HEADER_SIZE + kem_ct_len;
     if data.len() < kem_ct_end {
-        return Err(AftError::CryptoError("File truncated (KEM ciphertext)".into()));
+        return Err(AftError::CryptoError(
+            "File truncated (KEM ciphertext)".into(),
+        ));
     }
     let kem_ct = &data[HEADER_SIZE..kem_ct_end];
     let ciphertext = &data[kem_ct_end..];
@@ -176,12 +183,17 @@ pub async fn decrypt_file(input: &Path, output: &Path, key_file: &Path) -> AftRe
         EncryptionMethod::Neural => neural::decrypt_file_data(ciphertext, key_file)?,
         EncryptionMethod::Hybrid => {
             let shared_secret = pqc::decapsulate_key(kem_ct, key_file)?;
-            // Re-derive the same neural cipher from shared secret
+            // Re-derive the same neural cipher seed via HMAC-SHA256
+            use hmac::{Hmac, Mac};
+            type HmacSha256 = Hmac<sha2::Sha256>;
+            let mut mac = HmacSha256::new_from_slice(&shared_secret)
+                .map_err(|_| AftError::CryptoError("HMAC key init failed".into()))?;
+            mac.update(b"aft-neural-seed");
+            let derived = mac.finalize().into_bytes();
             let seed = u64::from_le_bytes(
-                shared_secret.get(..8)
-                    .ok_or_else(|| AftError::Other("Shared secret too short for seed derivation".into()))?
+                derived[..8]
                     .try_into()
-                    .map_err(|_| AftError::Other("Shared secret slice conversion failed".into()))?,
+                    .map_err(|_| AftError::CryptoError("Seed derivation failed".into()))?,
             );
             let cipher = neural::NeuralCipher::train(&neural::TrainConfig {
                 epochs: 100,
