@@ -42,8 +42,135 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
 - **FIPS 140-3 mode** — `cargo build --features fips` switches TLS to aws-lc-rs FIPS-validated provider
 - **CI/CD** — GitHub Actions pipeline with test, clippy, fmt, and cargo-audit
 - **Multiplexed streams** — Concurrent transfers over a single AFTP connection
+- **Deployment flexibility** — Local-only, air-gapped/SCIF, hardware/removable media,
+  sandboxed containers, and internet-connected environments all supported
 - **Cross-platform** — Windows, macOS, and Linux
-- **~9 MB binary** — LTO, stripped, single codegen unit, panic=abort
+- **~9 MB binary** — LTO, stripped, single codegen unit, panic=abort; zero runtime dependencies
+
+## Deployment Modes
+
+AFT is a self-contained static binary with no runtime dependencies, making it suitable
+for a wide range of operating environments — from internet-connected workstations to
+classified air-gapped networks.
+
+### Local-Only
+
+All core operations work without any network access via the `file://` scheme:
+
+```bash
+# Copy between local directories
+aft copy ./source/ ./backup/source/ -r
+
+# Compute checksums
+aft checksum ./release.bin --algorithm sha256
+
+# List local files
+aft ls ./data/
+
+# Encrypt / decrypt entirely offline
+aft crypto keygen -o ./keys/
+aft crypto encrypt ./secret.pdf -o ./secret.afte -k ./keys/keys.pub -m pqc
+aft crypto decrypt ./secret.afte -o ./secret.pdf -k ./keys/keys.sec
+```
+
+Local-to-local transfers use 256 KB I/O buffers and bypass all network code paths —
+no sockets are opened.
+
+### Air-Gapped / SCIF
+
+AFT is deployable on air-gapped and disconnected networks with no modification:
+
+- **Zero phone-home** — Disable telemetry with `aft telemetry opt-out`; no
+  license checks, update pings, or analytics at runtime
+- **No external dependencies** — Single static binary; no dynamic library loading
+  required (plugins are opt-in from `~/.aft/plugins/`)
+- **Offline crypto** — PQC keygen, encrypt, and decrypt use only local entropy
+  (`OsRng`) and need no network
+- **Local AFTP server** — `aft serve ./files` starts a file server over loopback
+  or an isolated LAN for high-performance binary transfers within a secure enclave
+- **FIPS 140-3 mode** — `cargo build --release --features fips` for environments
+  requiring FIPS-validated TLS (aws-lc-rs)
+
+```bash
+# Air-gapped workflow: server on one node, client on another
+# Node A (file server):
+aft serve ./shared --bind 10.0.0.1 --tls-cert cert.pem --tls-key key.pem --auth-token TOKEN
+
+# Node B (client):
+aft ls aftps://10.0.0.1:2600/
+aft get aftps://10.0.0.1:2600/payload.bin -o ./payload.bin
+```
+
+### Hardware Devices & Removable Media
+
+AFT treats any mounted filesystem path as a first-class transfer endpoint. This
+includes USB drives, external SSDs, NAS mounts, and block devices presented as volumes:
+
+```bash
+# Windows — USB drive mounted at E:\
+aft copy ./classified/ E:\transfer\classified\ -r
+aft checksum E:\transfer\classified\report.pdf --algorithm sha256
+
+# Linux / macOS — removable media at /mnt/usb
+aft copy ./data/ /mnt/usb/data/ -r
+aft get aftp://server:2600/export.tar -o /mnt/usb/export.tar
+
+# NAS / network share mounted locally
+aft copy -r /mnt/nas/project/ ./local-mirror/
+```
+
+Path resolution is automatic — any relative or absolute filesystem path, drive letter,
+or `file://` URI is handled by the local protocol handler with resume and range support.
+
+### Sandboxed & Minimal Environments
+
+AFT works in restricted environments (containers, CI runners, minimal VMs) with no
+special setup:
+
+- **No daemon** — Pure CLI invocation; no background service or socket needed
+- **No config required** — All options are passable via flags; `~/.aft/` is created
+  lazily only when needed (history, config, audit, telemetry)
+- **Deterministic agent mode** — `--agent` suppresses all interactive elements (progress
+  bars, color) for clean parsing in automation pipelines
+- **Stateless operation** — Each invocation is self-contained; no lock files or shared
+  state between runs
+- **Minimal I/O footprint** — `--format quiet` suppresses all non-error output;
+  `--quiet` combined with `--format json` emits only the final JSON result
+
+```bash
+# CI/CD pipeline — download, verify, no interactive output
+aft --agent get https://releases.example.com/build.tar.gz -o ./build.tar.gz \
+  --checksum sha256 \
+  --checksum-value abc123...
+
+# Container — transfer between mounted volumes
+aft copy /input/data.csv /output/data.csv
+
+# Sandboxed agent — structured JSON for programmatic consumption
+aft --format json checksum ./artifact.bin --algorithm sha256
+```
+
+### Arbitrary Protocols via Plugins
+
+Beyond the 12 built-in protocol handlers, AFT supports runtime-loadable protocol
+plugins as shared libraries (`.dll` / `.so` / `.dylib`). Plugins implement the
+`ProtocolHandler` trait and register a URL scheme:
+
+```bash
+# Load a custom protocol handler
+aft plugin load ./my-protocol.so
+
+# Use it with any AFT command
+aft get myproto://device/sensor-data -o ./readings.bin
+aft ls myproto://device/
+
+# Permanently install — drop into the plugin directory
+cp ./my-protocol.so ~/.aft/plugins/
+```
+
+Plugins are SHA-256 signature verified on load. This enables integration with
+proprietary transfer systems, hardware interfaces, or domain-specific protocols
+without modifying AFT itself. See [Plugin System](#plugin-system) for details.
 
 ## Installation
 
