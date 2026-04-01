@@ -5,7 +5,33 @@ All notable changes to AFT will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-03-24
+
+### Added
+
+- **Hardware-accelerated CRC32 per-frame integrity** — optional CRC32 trailer on
+  DATA frames using `crc32fast` (SSE4.2 / ARM CRC32 hardware instructions when
+  available). Negotiated via `CAP_CRC32_FRAMES` capability in the HELLO handshake.
+- **Deployment Modes documentation** — README section covering local-only,
+  air-gapped, hardware-accelerated, sandboxed, and plugin deployment topologies.
+
+### Changed
+
+- **XOR widening** — Hybrid crypto XOR step widened from byte-at-a-time to
+  `u64`-chunked processing via `xor_with_key()` for ~8× fewer loop iterations.
+- **TLS hardened** — minimum TLS 1.2 enforced; cipher suites restricted to
+  FIPS-compatible AES-256-GCM and AES-128-GCM with ECDHE key exchange.
+- **Auth rate limiting** — per-IP failure tracking with automatic 60-second
+  lockout after 5 consecutive failures.
+- **Credential scrubbing** — `user:password@` and sensitive query parameters
+  stripped from all log output.
+- **SMB path sanitization** — shell metacharacters rejected to prevent command
+  injection in SMB paths.
+
+### Fixed
+
+- Resolved `cargo audit` advisories for `aws-lc-sys` (RUSTSEC-2024-0425) and
+  `rustls-webpki` (RUSTSEC-2025-0013) via dependency updates.
 
 ## [1.0.0] - 2026-03-23
 
