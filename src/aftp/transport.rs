@@ -41,6 +41,69 @@ pub trait TransportConnector: Send + Sync {
 
 // ── TCP Transport ───────────────────────────────────────────────────────────
 
+/// Target socket buffer size for high-throughput transfers (16 MiB).
+const TARGET_SOCK_BUF: u32 = 16 * 1024 * 1024;
+
+/// Tune a TCP socket for high-throughput transfers by enlarging send/receive
+/// buffers and enabling low-latency options.
+fn tune_tcp_socket(stream: &TcpStream) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let buf = TARGET_SOCK_BUF as libc::c_int;
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &buf as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &buf as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            #[cfg(target_os = "linux")]
+            {
+                let one: libc::c_int = 1;
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_QUICKACK,
+                    &one as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        let sock = stream.as_raw_socket() as windows_sys::Win32::Networking::WinSock::SOCKET;
+        let buf = TARGET_SOCK_BUF as i32;
+        unsafe {
+            windows_sys::Win32::Networking::WinSock::setsockopt(
+                sock,
+                windows_sys::Win32::Networking::WinSock::SOL_SOCKET as i32,
+                windows_sys::Win32::Networking::WinSock::SO_SNDBUF as i32,
+                &buf as *const _ as *const u8,
+                std::mem::size_of::<i32>() as i32,
+            );
+            windows_sys::Win32::Networking::WinSock::setsockopt(
+                sock,
+                windows_sys::Win32::Networking::WinSock::SOL_SOCKET as i32,
+                windows_sys::Win32::Networking::WinSock::SO_RCVBUF as i32,
+                &buf as *const _ as *const u8,
+                std::mem::size_of::<i32>() as i32,
+            );
+        }
+    }
+}
+
 pub struct TcpTransportListener {
     listener: TcpListener,
 }
@@ -65,6 +128,7 @@ impl TransportListener for TcpTransportListener {
     async fn accept(&self) -> AftResult<TransportStream> {
         let (stream, addr) = self.listener.accept().await?;
         stream.set_nodelay(true).ok();
+        tune_tcp_socket(&stream);
         let (rd, wr) = stream.into_split();
         Ok(TransportStream {
             reader: Box::new(rd),
@@ -83,6 +147,7 @@ impl TransportConnector for TcpTransportConnector {
             .await
             .map_err(|e| AftError::ConnectionFailed(format!("TCP connect {}: {}", addr, e)))?;
         stream.set_nodelay(true).ok();
+        tune_tcp_socket(&stream);
         let peer = stream.peer_addr().unwrap_or_else(|_| {
             SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
         });
@@ -262,14 +327,10 @@ where
                 let msg = tokio_tungstenite::tungstenite::Message::Binary(buf.to_vec());
                 match std::pin::Pin::new(&mut self.inner).start_send(msg) {
                     Ok(()) => std::task::Poll::Ready(Ok(buf.len())),
-                    Err(e) => std::task::Poll::Ready(Err(std::io::Error::other(
-                        e,
-                    ))),
+                    Err(e) => std::task::Poll::Ready(Err(std::io::Error::other(e))),
                 }
             }
-            std::task::Poll::Ready(Err(e)) => {
-                std::task::Poll::Ready(Err(std::io::Error::other(e)))
-            }
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(std::io::Error::other(e))),
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
@@ -280,9 +341,7 @@ where
     ) -> std::task::Poll<std::io::Result<()>> {
         match std::pin::Pin::new(&mut self.inner).poll_flush(cx) {
             std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
-            std::task::Poll::Ready(Err(e)) => {
-                std::task::Poll::Ready(Err(std::io::Error::other(e)))
-            }
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(std::io::Error::other(e))),
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
@@ -293,9 +352,7 @@ where
     ) -> std::task::Poll<std::io::Result<()>> {
         match std::pin::Pin::new(&mut self.inner).poll_close(cx) {
             std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
-            std::task::Poll::Ready(Err(e)) => {
-                std::task::Poll::Ready(Err(std::io::Error::other(e)))
-            }
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(std::io::Error::other(e))),
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }

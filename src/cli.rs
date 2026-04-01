@@ -103,6 +103,25 @@ pub struct Cli {
     /// Maximum bandwidth in bytes per second (0 = unlimited)
     #[arg(long, default_value = "0", global = true)]
     pub rate_limit: u64,
+    /// Enable turbo transfer mode: adaptive multi-stream, mmap, socket tuning
+    #[arg(long, global = true)]
+    pub turbo: bool,
+
+    /// Number of parallel streams per file in turbo mode (0 = auto from link probe)
+    #[arg(long, default_value = "0", global = true)]
+    pub streams: usize,
+
+    /// Chunk size in bytes for turbo transfers (0 = adaptive)
+    #[arg(long, default_value = "0", global = true)]
+    pub chunk_size: u64,
+
+    /// Socket buffer size in bytes for turbo mode (0 = auto from BDP)
+    #[arg(long, default_value = "0", global = true)]
+    pub sock_buf: u32,
+
+    /// Disable memory-mapped I/O in turbo mode
+    #[arg(long, global = true)]
+    pub no_mmap: bool,
 
     /// Pin a TLS certificate by SHA-256 fingerprint (hex-encoded, for AFTPS connections)
     #[arg(long, global = true)]
