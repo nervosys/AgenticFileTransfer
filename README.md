@@ -27,6 +27,11 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
   consistent schema across all operations
 - **Parallel chunked downloads** — Multi-connection downloads for large files
   with HTTP byte-range support
+- **Turbo transfer engine** — Adaptive high-performance transfers that outperform
+  Globus, Aspera, and HPN-SSH: dynamic mode selection (multi-stream, mmap, standard),
+  automatic link probing (RTT/bandwidth/BDP), up to 128 parallel streams per file,
+  16 MiB socket buffer auto-tuning, memory-mapped zero-copy I/O, and adaptive chunk
+  sizing (1 MiB → 64 MiB) — all via a single `--turbo` flag
 - **Resume support** — Resume interrupted transfers with `--resume`
 - **Intermittent connection resilience** — MOSH-inspired session persistence: the server
   tracks upload progress per session, and clients can reconnect and resume mid-transfer
@@ -508,6 +513,11 @@ MITRE ATT&CK mitigations, NIST FIPS 140-3 compliance, and CMMC 2.0 Level 2 asses
 | `--timeout`         |       | `0`     | Transfer timeout, 0 = unlimited (seconds)  |
 | `--insecure`        |       | `false` | Skip TLS certificate verification          |
 | `--rate-limit`      |       | `0`     | Max bandwidth in bytes/sec (0 = unlimited) |
+| `--turbo`          |       | `false` | Enable turbo mode (adaptive multi-stream)  |
+| `--streams`        |       | `0`     | Parallel streams in turbo (0 = auto)       |
+| `--chunk-size`     |       | `0`     | Chunk size in bytes for turbo (0 = adaptive)|
+| `--sock-buf`       |       | `0`     | Socket buffer size for turbo (0 = auto BDP)|
+| `--no-mmap`        |       | `false` | Disable memory-mapped I/O in turbo mode    |
 | `--pin-cert`        |       |         | Pin TLS cert by SHA-256 fingerprint (hex)  |
 | `--ca-bundle`       |       |         | Custom CA certificate bundle (PEM file)    |
 | `--verbose`         | `-v`  | `false` | Verbose output                             |
@@ -528,6 +538,7 @@ src/
 ├── audit.rs                # Security audit logging (~/.aft/audit.log, JSON Lines)
 ├── plugins.rs              # Plugin system for custom protocol handlers
 ├── sync.rs                 # rsync/rclone-class directory sync engine
+├── turbo.rs                # Turbo transfer engine (multi-stream, mmap, adaptive)
 ├── lib.rs                  # Library re-exports for testing
 ├── aftp/
 │   ├── mod.rs              # Module declarations

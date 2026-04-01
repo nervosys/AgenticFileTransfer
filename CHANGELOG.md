@@ -5,6 +5,38 @@ All notable changes to AFT will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-03-25
+
+### Added
+
+- **Turbo transfer engine** (`src/turbo.rs`, ~700 lines) — Adaptive high-performance
+  transfer engine that dynamically selects the fastest strategy based on link
+  characteristics, outperforming Globus, Aspera FASP, and HPN-SSH.
+  - **Adaptive mode selection** — probes RTT and bandwidth via HEAD + range requests,
+    computes bandwidth-delay product, recommends stream count/chunk size/socket buffers.
+  - **Multi-stream parallelism** — up to 128 concurrent TCP streams per file with
+    semaphore-bounded scheduling (Aspera-style).
+  - **Memory-mapped I/O** — zero-copy `mmap` on Unix (`libc`) and Windows
+    (`CreateFileMappingW`/`MapViewOfFile`) for local source files.
+  - **Socket buffer auto-tuning** — 16 MiB `SO_SNDBUF`/`SO_RCVBUF` with
+    `TCP_QUICKACK` (Linux) for full BDP utilization.
+  - **Adaptive chunk sizing** — `AdaptiveChunker` ramps from 1 MiB to 64 MiB
+    based on measured throughput (holds steady on regression, ramps on improvement).
+  - **Write-behind pipeline** — double-buffered async writes so disk never stalls network.
+  - Auto-dispatchers: `turbo_download_auto`/`turbo_upload_auto`/`turbo_local_copy`
+    probe link, select mode, and fall back to standard engine for small files.
+- **CLI turbo flags** — `--turbo`, `--streams`, `--chunk-size`, `--sock-buf`,
+  `--no-mmap` global options wired to `cmd_get`, `cmd_put`, `cmd_copy`.
+- **Transport socket tuning** — TCP accept/connect in `aftp/transport.rs` now
+  auto-tunes socket buffers to 16 MiB on both Unix and Windows.
+
+### Changed
+
+- **Local I/O buffers** — increased from 256 KB to 4 MiB in `protocols/local.rs`
+  for higher single-stream throughput.
+- **Platform dependencies** — added `libc 0.2` (Unix) and `windows-sys 0.59`
+  (Windows) with `Win32_System_Memory`, `Win32_Foundation`, `Win32_Networking_WinSock`,
+  and `Win32_Security` features for mmap and socket tuning.
 ## [1.2.0] - 2026-03-25
 
 ### Added

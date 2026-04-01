@@ -12,6 +12,7 @@ mod plugins;
 mod protocols;
 mod sync;
 mod telemetry;
+mod turbo;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -437,6 +438,17 @@ fn build_opts(
     opts
 }
 
+fn build_turbo_config(cli: &Cli) -> turbo::TurboConfig {
+    turbo::TurboConfig {
+        enabled: cli.turbo,
+        streams: cli.streams,
+        chunk_size: cli.chunk_size,
+        sock_buf: cli.sock_buf,
+        mmap: !cli.no_mmap,
+        write_pipeline: true,
+        rate_limit: cli.rate_limit,
+    }
+}
 fn resolve_output_path(url: &str, output: Option<&str>) -> PathBuf {
     if let Some(out) = output {
         let path = PathBuf::from(out);
@@ -534,7 +546,14 @@ async fn cmd_get(
         }) as ProgressCb
     });
 
-    let result = engine::download(&*handler, url, &dest, &opts, &config, progress_cb).await;
+    let result = if cli.turbo {
+        let tc = build_turbo_config(cli);
+        turbo::turbo_download_auto(&*handler, url, &dest, &opts, &tc, progress_cb)
+            .await
+            .map(|(tr, _profile)| tr)
+    } else {
+        engine::download(&*handler, url, &dest, &opts, &config, progress_cb).await
+    };
 
     if let Some(ref pb) = pb {
         pb.finish_and_clear();
@@ -599,17 +618,24 @@ async fn cmd_put(
         }) as ProgressCb
     });
 
-    let result = engine::upload(
-        &*handler,
-        source_path,
-        url,
-        &opts,
-        &config,
-        content_type,
-        Some(method),
-        progress_cb,
-    )
-    .await;
+    let result = if cli.turbo {
+        let tc = build_turbo_config(cli);
+        turbo::turbo_upload_auto(&*handler, source_path, url, &opts, &tc, content_type, Some(method), progress_cb)
+            .await
+            .map(|(tr, _profile)| tr)
+    } else {
+        engine::upload(
+            &*handler,
+            source_path,
+            url,
+            &opts,
+            &config,
+            content_type,
+            Some(method),
+            progress_cb,
+        )
+        .await
+    };
 
     if let Some(ref pb) = pb {
         pb.finish_and_clear();
@@ -688,15 +714,19 @@ async fn cmd_copy(
             }) as ProgressCb
         });
 
-        let result = engine::download(
-            &*src_handler,
-            source,
-            &dest_path,
-            &opts,
-            &config,
-            progress_cb,
-        )
-        .await;
+        let result = if cli.turbo {
+            turbo::turbo_local_copy(Path::new(source), &dest_path, progress_cb).await
+        } else {
+            engine::download(
+                &*src_handler,
+                source,
+                &dest_path,
+                &opts,
+                &config,
+                progress_cb,
+            )
+            .await
+        };
 
         if let Some(ref pb) = pb {
             pb.finish_and_clear();
