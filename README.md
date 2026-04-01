@@ -542,6 +542,10 @@ pub trait ProtocolHandler: Send + Sync {
 - **Streaming** — Data streams directly to disk without full buffering
 - **256 KB I/O buffers** — Tuned buffer sizes for local file operations
 - **1 MB AFTP frames** — 0.001% framing overhead at maximum frame size
+- **Hardware-accelerated CRC32** — Per-frame integrity via `crc32fast` using
+  SSE4.2 / ARM CRC32 hardware instructions when available
+- **Widened XOR** — Hybrid crypto XOR step processes `u64` chunks (~8× fewer
+  loop iterations than byte-at-a-time)
 - **Connection pooling** — reqwest's built-in pool for HTTP
 - **Release profile** — LTO, single codegen unit, stripped, panic=abort (~9 MB)
 
