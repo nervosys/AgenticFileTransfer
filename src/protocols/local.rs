@@ -29,11 +29,13 @@ impl ProtocolHandler for LocalHandler {
 
     async fn head(&self, url: &str, _opts: &ProtocolOptions) -> AftResult<ResourceMetadata> {
         let path = url_to_path(url);
-        let metadata = tokio::fs::metadata(&path).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => AftError::FileNotFound(path.clone()),
-            std::io::ErrorKind::PermissionDenied => AftError::PermissionDenied(path.clone()),
-            _ => AftError::Io(e),
-        })?;
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => AftError::FileNotFound(path.clone()),
+                std::io::ErrorKind::PermissionDenied => AftError::PermissionDenied(path.clone()),
+                _ => AftError::Io(e),
+            })?;
 
         let last_modified = metadata
             .modified()
@@ -59,16 +61,15 @@ impl ProtocolHandler for LocalHandler {
         progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
     ) -> AftResult<u64> {
         let source_path = url_to_path(url);
-        let mut source =
-            tokio::fs::File::open(&source_path)
-                .await
-                .map_err(|e| match e.kind() {
-                    std::io::ErrorKind::NotFound => AftError::FileNotFound(source_path.clone()),
-                    std::io::ErrorKind::PermissionDenied => {
-                        AftError::PermissionDenied(source_path.clone())
-                    }
-                    _ => AftError::Io(e),
-                })?;
+        let mut source = tokio::fs::File::open(&source_path)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => AftError::FileNotFound(source_path.clone()),
+                std::io::ErrorKind::PermissionDenied => {
+                    AftError::PermissionDenied(source_path.clone())
+                }
+                _ => AftError::Io(e),
+            })?;
 
         let total_size = source.metadata().await?.len();
         let mut bytes_written = 0u64;
@@ -164,16 +165,13 @@ impl ProtocolHandler for LocalHandler {
     async fn list(&self, url: &str, _opts: &ProtocolOptions) -> AftResult<Vec<DirectoryEntry>> {
         let path = url_to_path(url);
         let mut entries = Vec::new();
-        let mut dir =
-            tokio::fs::read_dir(&path)
-                .await
-                .map_err(|e| match e.kind() {
-                    std::io::ErrorKind::NotFound => AftError::FileNotFound(path.clone()),
-                    std::io::ErrorKind::PermissionDenied => {
-                        AftError::PermissionDenied(path.clone())
-                    }
-                    _ => AftError::Io(e),
-                })?;
+        let mut dir = tokio::fs::read_dir(&path)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => AftError::FileNotFound(path.clone()),
+                std::io::ErrorKind::PermissionDenied => AftError::PermissionDenied(path.clone()),
+                _ => AftError::Io(e),
+            })?;
 
         while let Some(entry) = dir.next_entry().await? {
             let meta = entry.metadata().await?;
@@ -182,16 +180,88 @@ impl ProtocolHandler for LocalHandler {
                 .ok()
                 .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
+            let is_symlink = entry.file_type().await.map(|ft| ft.is_symlink()).ok();
+
+            #[cfg(unix)]
+            let permissions = {
+                use std::os::unix::fs::PermissionsExt;
+                Some(meta.permissions().mode())
+            };
+            #[cfg(not(unix))]
+            let permissions = None;
+
             entries.push(DirectoryEntry {
                 name: entry.file_name().to_string_lossy().to_string(),
                 size: Some(meta.len()),
                 is_directory: meta.is_dir(),
                 last_modified,
+                relative_path: None,
+                is_symlink,
+                permissions,
             });
         }
 
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(entries)
+    }
+
+    fn supports_extended_ops(&self) -> bool {
+        true
+    }
+
+    async fn delete(&self, url: &str, _recursive: bool, _opts: &ProtocolOptions) -> AftResult<()> {
+        let path = url_to_path(url);
+        let meta = tokio::fs::metadata(&path)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => AftError::FileNotFound(path.clone()),
+                std::io::ErrorKind::PermissionDenied => AftError::PermissionDenied(path.clone()),
+                _ => AftError::Io(e),
+            })?;
+
+        if meta.is_dir() {
+            tokio::fs::remove_dir_all(&path).await?;
+        } else {
+            tokio::fs::remove_file(&path).await?;
+        }
+        Ok(())
+    }
+
+    async fn rename(&self, from: &str, to: &str, _opts: &ProtocolOptions) -> AftResult<()> {
+        let src = url_to_path(from);
+        let dst = url_to_path(to);
+        if let Some(parent) = std::path::Path::new(&dst).parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::rename(&src, &dst).await?;
+        Ok(())
+    }
+
+    async fn mkdir(&self, url: &str, _opts: &ProtocolOptions) -> AftResult<()> {
+        let path = url_to_path(url);
+        tokio::fs::create_dir_all(&path).await?;
+        Ok(())
+    }
+
+    async fn set_timestamps(
+        &self,
+        url: &str,
+        mtime: chrono::DateTime<chrono::Utc>,
+        _opts: &ProtocolOptions,
+    ) -> AftResult<()> {
+        let path = url_to_path(url);
+        let system_time = std::time::SystemTime::from(mtime);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => AftError::FileNotFound(path.clone()),
+            _ => AftError::Io(e),
+        })?;
+        file.set_modified(system_time)?;
+        Ok(())
+    }
+
+    async fn exists(&self, url: &str, _opts: &ProtocolOptions) -> AftResult<bool> {
+        let path = url_to_path(url);
+        Ok(std::path::Path::new(&path).exists())
     }
 }
 

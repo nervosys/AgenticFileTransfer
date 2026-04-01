@@ -20,6 +20,7 @@ pub mod crypto;
 pub mod engine;
 pub mod error;
 pub mod protocols;
+pub mod sync;
 
 // Internal modules — exposed for integration testing only
 #[doc(hidden)]

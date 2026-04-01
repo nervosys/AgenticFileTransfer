@@ -380,6 +380,9 @@ fn parse_azure_list_response(xml: &str, prefix: &str) -> Vec<DirectoryEntry> {
                         size: None,
                         is_directory: true,
                         last_modified: None,
+                        relative_path: None,
+                        is_symlink: None,
+                        permissions: None,
                     });
                 }
             }
@@ -407,6 +410,9 @@ fn parse_azure_list_response(xml: &str, prefix: &str) -> Vec<DirectoryEntry> {
                         size,
                         is_directory: false,
                         last_modified,
+                        relative_path: None,
+                        is_symlink: None,
+                        permissions: None,
                     });
                 }
             }

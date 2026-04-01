@@ -130,6 +130,9 @@ impl ProtocolHandler for AftpHandler {
                 size: Some(e.size),
                 is_directory: e.is_dir,
                 last_modified: Some(format!("{}", e.modified_secs)),
+                relative_path: None,
+                is_symlink: None,
+                permissions: None,
             })
             .collect())
     }

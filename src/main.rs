@@ -10,6 +10,7 @@ mod ontology;
 mod output;
 mod plugins;
 mod protocols;
+mod sync;
 mod telemetry;
 
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use std::sync::Arc;
 use clap::Parser;
 use sha2::Digest;
 
-use cli::{ChecksumAlgorithm, Cli, Command, OutputFormat, PluginAction, TelemetryAction};
+use cli::{ChecksumAlgorithm, Cli, CliCompareMode, Command, OutputFormat, PluginAction, TelemetryAction};
 use colored::Colorize;
 use engine::ProgressCb;
 use error::AftResult;
@@ -303,13 +304,17 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
             source,
             destination,
             recursive,
-        } => cmd_copy(cli, format, source, destination, *recursive).await,
+            include,
+            exclude,
+            preserve,
+            dry_run,
+        } => cmd_copy(cli, format, source, destination, *recursive, include, exclude, *preserve, *dry_run).await,
         Command::Head {
             url,
             headers,
             bearer_token,
         } => cmd_head(cli, format, url, headers, bearer_token.as_deref()).await,
-        Command::List { url } => cmd_list(cli, format, url).await,
+        Command::List { url, recursive, long } => cmd_list(cli, format, url, *recursive, *long).await,
         Command::Schema => {
             ontology::print_schema(format);
             Ok(OutputResult::success("schema"))
@@ -358,6 +363,23 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
             server.run().await?;
             Ok(OutputResult::success("serve"))
         }
+        Command::Sync {
+            source,
+            destination,
+            compare,
+            dry_run,
+            delete,
+            update,
+            preserve,
+            include,
+            exclude,
+            min_size,
+            max_size,
+            max_depth,
+        } => cmd_sync(cli, format, source, destination, compare, *dry_run, *delete, *update, *preserve, include, exclude, *min_size, *max_size, *max_depth).await,
+        Command::Move { source, destination } => cmd_mv(cli, source, destination).await,
+        Command::Remove { url, recursive, force: _ } => cmd_rm(cli, url, *recursive).await,
+        Command::Mkdir { url } => cmd_mkdir(cli, url).await,
         Command::Plugin { action } => cmd_plugin(action).await,
         Command::Crypto { action } => cmd_crypto(action).await,
         Command::Telemetry { action } => cmd_telemetry(action).await,
@@ -611,12 +633,17 @@ async fn cmd_put(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_copy(
     cli: &Cli,
     format: Format,
     source: &str,
     destination: &str,
     recursive: bool,
+    _include: &[String],
+    _exclude: &[String],
+    _preserve: bool,
+    _dry_run: bool,
 ) -> AftResult<OutputResult> {
     let src_handler = protocols::resolve_protocol(source)?;
     let dst_handler = protocols::resolve_protocol(destination)?;
@@ -654,13 +681,12 @@ async fn cmd_copy(
         }
 
         let pb = output::create_progress_bar(None, format);
-        let progress_cb: Option<ProgressCb> =
-            pb.as_ref().map(|pb| {
-                let pb = pb.clone();
-                Arc::new(move |bytes: u64, _total: Option<u64>| {
-                    pb.set_position(bytes);
-                }) as ProgressCb
-            });
+        let progress_cb: Option<ProgressCb> = pb.as_ref().map(|pb| {
+            let pb = pb.clone();
+            Arc::new(move |bytes: u64, _total: Option<u64>| {
+                pb.set_position(bytes);
+            }) as ProgressCb
+        });
 
         let result = engine::download(
             &*src_handler,
@@ -784,11 +810,16 @@ async fn cmd_head(
     }
 }
 
-async fn cmd_list(cli: &Cli, _format: Format, url: &str) -> AftResult<OutputResult> {
+async fn cmd_list(cli: &Cli, _format: Format, url: &str, recursive: bool, _long: bool) -> AftResult<OutputResult> {
     let handler = protocols::resolve_protocol(url)?;
     let opts = build_opts(cli, &[], None, None, None, None);
 
-    match handler.list(url, &opts).await {
+    let list_result = if recursive {
+        handler.list_recursive(url, &opts, 200).await
+    } else {
+        handler.list(url, &opts).await
+    };
+    match list_result {
         Ok(entries) => {
             let mut out = OutputResult::success("List");
             out.source = Some(url.to_string());
@@ -802,6 +833,111 @@ async fn cmd_list(cli: &Cli, _format: Format, url: &str) -> AftResult<OutputResu
             Ok(out)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_sync(
+    cli: &Cli,
+    _format: Format,
+    source: &str,
+    destination: &str,
+    compare: &CliCompareMode,
+    dry_run: bool,
+    delete: bool,
+    update: bool,
+    preserve: bool,
+    include: &[String],
+    exclude: &[String],
+    min_size: Option<u64>,
+    max_size: Option<u64>,
+    max_depth: usize,
+) -> AftResult<OutputResult> {
+    let src_handler = protocols::resolve_protocol(source)?;
+    let dst_handler = protocols::resolve_protocol(destination)?;
+    let opts = build_opts(cli, &[], None, None, None, None);
+
+    let compare_mode = match compare {
+        CliCompareMode::Size => sync::CompareMode::Size,
+        CliCompareMode::Modtime => sync::CompareMode::ModTime,
+        CliCompareMode::Checksum => sync::CompareMode::Checksum,
+    };
+
+    let config = sync::SyncConfig {
+        compare: compare_mode,
+        dry_run,
+        delete,
+        update,
+        preserve_timestamps: preserve,
+        include: include.to_vec(),
+        exclude: exclude.to_vec(),
+        min_size,
+        max_size,
+        max_depth,
+        transfer: engine::TransferConfig {
+            parallel_chunks: cli.parallel,
+            max_retries: cli.retries,
+            retry_delay_ms: cli.retry_delay_ms,
+            rate_limit_bytes_per_sec: cli.rate_limit,
+            ..Default::default()
+        },
+    };
+
+    let result = sync::sync(&*src_handler, source, &*dst_handler, destination, &opts, &config, None).await?;
+
+    let mut out = OutputResult::success("Sync");
+    out.source = Some(source.to_string());
+    out.destination = Some(destination.to_string());
+    out.extra = Some(serde_json::to_value(&result).unwrap_or_default());
+    Ok(out)
+}
+
+async fn cmd_mv(cli: &Cli, source: &str, destination: &str) -> AftResult<OutputResult> {
+    let handler = protocols::resolve_protocol(source)?;
+    let opts = build_opts(cli, &[], None, None, None, None);
+
+    if !handler.supports_extended_ops() {
+        return Ok(OutputResult::failure("Move", "Protocol does not support move/rename operations"));
+    }
+
+    handler.rename(source, destination, &opts).await?;
+
+    let mut out = OutputResult::success("Move");
+    out.source = Some(source.to_string());
+    out.destination = Some(destination.to_string());
+    out.protocol = Some(handler.scheme().to_string());
+    Ok(out)
+}
+
+async fn cmd_rm(cli: &Cli, url: &str, recursive: bool) -> AftResult<OutputResult> {
+    let handler = protocols::resolve_protocol(url)?;
+    let opts = build_opts(cli, &[], None, None, None, None);
+
+    if !handler.supports_extended_ops() {
+        return Ok(OutputResult::failure("Remove", "Protocol does not support delete operations"));
+    }
+
+    handler.delete(url, recursive, &opts).await?;
+
+    let mut out = OutputResult::success("Remove");
+    out.source = Some(url.to_string());
+    out.protocol = Some(handler.scheme().to_string());
+    Ok(out)
+}
+
+async fn cmd_mkdir(cli: &Cli, url: &str) -> AftResult<OutputResult> {
+    let handler = protocols::resolve_protocol(url)?;
+    let opts = build_opts(cli, &[], None, None, None, None);
+
+    if !handler.supports_extended_ops() {
+        return Ok(OutputResult::failure("Mkdir", "Protocol does not support mkdir operations"));
+    }
+
+    handler.mkdir(url, &opts).await?;
+
+    let mut out = OutputResult::success("Mkdir");
+    out.source = Some(url.to_string());
+    out.protocol = Some(handler.scheme().to_string());
+    Ok(out)
 }
 
 async fn cmd_checksum(
@@ -907,6 +1043,9 @@ async fn cmd_plugin(action: &PluginAction) -> AftResult<OutputResult> {
                     size: None,
                     is_directory: false,
                     last_modified: Some(p.description.clone()),
+                    relative_path: None,
+                    is_symlink: None,
+                    permissions: None,
                 })
                 .collect();
             out.entries = Some(entries);
@@ -1116,13 +1255,12 @@ async fn recursive_local_copy(
             } else if file_type.is_file() {
                 let src_str = entry.path().display().to_string();
                 let pb = output::create_progress_bar(None, format);
-                let progress_cb: Option<ProgressCb> =
-                    pb.as_ref().map(|pb| {
-                        let pb = pb.clone();
-                        Arc::new(move |bytes: u64, _total: Option<u64>| {
-                            pb.set_position(bytes);
-                        }) as ProgressCb
-                    });
+                let progress_cb: Option<ProgressCb> = pb.as_ref().map(|pb| {
+                    let pb = pb.clone();
+                    Arc::new(move |bytes: u64, _total: Option<u64>| {
+                        pb.set_position(bytes);
+                    }) as ProgressCb
+                });
                 let result =
                     engine::download(&*handler, &src_str, &dest_entry, &opts, config, progress_cb)
                         .await;

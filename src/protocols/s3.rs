@@ -230,6 +230,9 @@ impl ProtocolHandler for S3Handler {
                             size: None,
                             is_directory: true,
                             last_modified: None,
+                            relative_path: None,
+                            is_symlink: None,
+                            permissions: None,
                         });
                     }
                 }
@@ -248,6 +251,9 @@ impl ProtocolHandler for S3Handler {
                         size: Some(obj.size),
                         is_directory: false,
                         last_modified: Some(obj.last_modified.clone()),
+                        relative_path: None,
+                        is_symlink: None,
+                        permissions: None,
                     });
                 }
             }

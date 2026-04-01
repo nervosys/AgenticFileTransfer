@@ -327,6 +327,9 @@ impl ProtocolHandler for GcsHandler {
                             size: None,
                             is_directory: true,
                             last_modified: None,
+                            relative_path: None,
+                            is_symlink: None,
+                            permissions: None,
                         });
                     }
                 }
@@ -356,6 +359,9 @@ impl ProtocolHandler for GcsHandler {
                         size,
                         is_directory: false,
                         last_modified,
+                        relative_path: None,
+                        is_symlink: None,
+                        permissions: None,
                     });
                 }
             }

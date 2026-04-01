@@ -5,6 +5,37 @@ All notable changes to AFT will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-03-25
+
+### Added
+
+- **Sync engine** — rsync/rclone-class directory synchronization via `aft sync`
+  with configurable compare modes (size, modtime, checksum), `--dry-run` preview,
+  `--delete` extraneous files, include/exclude glob filters, size filters, and
+  depth limiting.
+- **Move command** — `aft mv` for moving/renaming files across protocols.
+- **Remove command** — `aft rm` for deleting files and directories with optional
+  `--recursive` flag.
+- **Mkdir command** — `aft mkdir` for creating directories on any protocol.
+- **Extended protocol operations** — `ProtocolHandler` trait extended with 7 new
+  default methods: `supports_extended_ops()`, `delete()`, `rename()`,
+  `mkdir()`, `set_timestamps()`, `exists()`, and `list_recursive()`.
+  Full implementations on local filesystem; other protocols inherit safe defaults.
+- **DirectoryEntry metadata** — `relative_path`, `is_symlink`, and
+  `permissions` fields for richer directory listings.
+- **Recursive listing** — `aft ls -r` with depth-limited BFS traversal.
+- **Long listing format** — `aft ls -l` for detailed directory output.
+- **Preserve timestamps** — `--preserve` flag on `aft copy`.
+- **Include/exclude filters** — `--include` and `--exclude` glob patterns on
+  `aft copy` and `aft sync`.
+- **Dry-run mode** — `--dry-run` on copy and sync to preview operations.
+- **314 tests** — 43 new tests covering sync engine, extended protocol operations,
+  and new CLI subcommands.
+
+### Changed
+
+- CLI expanded from 12 to 16 subcommands.
+- `OutputResult` gains an optional `extra` field for structured sync results.
 ## [1.1.0] - 2026-03-24
 
 ### Added

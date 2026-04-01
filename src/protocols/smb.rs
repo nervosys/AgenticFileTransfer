@@ -301,6 +301,9 @@ impl ProtocolHandler for SmbHandler {
                 },
                 is_directory: meta.is_dir(),
                 last_modified: modified,
+                relative_path: None,
+                is_symlink: None,
+                permissions: None,
             });
         }
 
@@ -475,6 +478,9 @@ async fn smbclient_list(
                     size: None,
                     is_directory: is_dir,
                     last_modified: None,
+                    relative_path: None,
+                    is_symlink: None,
+                    permissions: None,
                 });
             }
         }

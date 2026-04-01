@@ -275,5 +275,8 @@ fn parse_ftp_list_line(line: &str) -> Option<DirectoryEntry> {
         size: Some(size),
         is_directory,
         last_modified: Some(format!("{} {} {}", parts[5], parts[6], parts[7])),
+        relative_path: None,
+        is_symlink: None,
+        permissions: None,
     })
 }

@@ -36,6 +36,9 @@ pub struct OutputResult {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
+    /// Additional operation-specific data
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
     /// ISO 8601 timestamp of the operation
     pub timestamp: String,
 }
@@ -52,6 +55,7 @@ impl OutputResult {
             entries: None,
             error: None,
             protocol: None,
+            extra: None,
             timestamp: chrono::Utc::now().to_rfc3339(),
         }
     }
@@ -67,6 +71,7 @@ impl OutputResult {
             entries: None,
             error: Some(error.to_string()),
             protocol: None,
+            extra: None,
             timestamp: chrono::Utc::now().to_rfc3339(),
         }
     }

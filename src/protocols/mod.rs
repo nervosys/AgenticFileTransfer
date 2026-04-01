@@ -33,6 +33,15 @@ pub struct DirectoryEntry {
     pub size: Option<u64>,
     pub is_directory: bool,
     pub last_modified: Option<String>,
+    /// Relative path from the listing root (populated by recursive listing)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<String>,
+    /// Whether this entry is a symbolic link
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_symlink: Option<bool>,
+    /// Unix permissions (e.g. 0o755), if available
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<u32>,
 }
 
 /// Options for configuring a protocol handler
@@ -108,6 +117,92 @@ pub trait ProtocolHandler: Send + Sync {
 
     /// List directory contents at a URL
     async fn list(&self, url: &str, opts: &ProtocolOptions) -> AftResult<Vec<DirectoryEntry>>;
+
+
+    // ------------------------------------------------------------------
+    // Extended operations
+    // ------------------------------------------------------------------
+
+    /// Whether this handler implements extended operations
+    fn supports_extended_ops(&self) -> bool {
+        false
+    }
+
+    /// Delete a file or directory at the given URL.
+    async fn delete(&self, _url: &str, _recursive: bool, _opts: &ProtocolOptions) -> AftResult<()> {
+        Err(AftError::UnsupportedProtocol(
+            "delete is not supported by this protocol".to_string(),
+        ))
+    }
+
+    /// Rename / move a resource.
+    async fn rename(&self, _from: &str, _to: &str, _opts: &ProtocolOptions) -> AftResult<()> {
+        Err(AftError::UnsupportedProtocol(
+            "rename is not supported by this protocol".to_string(),
+        ))
+    }
+
+    /// Create a directory (including parents).
+    async fn mkdir(&self, _url: &str, _opts: &ProtocolOptions) -> AftResult<()> {
+        Err(AftError::UnsupportedProtocol(
+            "mkdir is not supported by this protocol".to_string(),
+        ))
+    }
+
+    /// Set the modification time on a remote resource.
+    async fn set_timestamps(
+        &self,
+        _url: &str,
+        _mtime: chrono::DateTime<chrono::Utc>,
+        _opts: &ProtocolOptions,
+    ) -> AftResult<()> {
+        Err(AftError::UnsupportedProtocol(
+            "set_timestamps is not supported by this protocol".to_string(),
+        ))
+    }
+
+    /// Check whether a resource exists.
+    async fn exists(&self, url: &str, opts: &ProtocolOptions) -> AftResult<bool> {
+        match self.head(url, opts).await {
+            Ok(_) => Ok(true),
+            Err(AftError::FileNotFound(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Recursively list all entries under a URL.
+    async fn list_recursive(
+        &self,
+        url: &str,
+        opts: &ProtocolOptions,
+        max_depth: usize,
+    ) -> AftResult<Vec<DirectoryEntry>> {
+        let effective_max = if max_depth == 0 { 200 } else { max_depth };
+        let mut result = Vec::new();
+        let mut stack: Vec<(String, String, usize)> = vec![(url.to_string(), String::new(), 0)];
+
+        while let Some((current_url, prefix, depth)) = stack.pop() {
+            if depth > effective_max {
+                continue;
+            }
+            let entries = self.list(&current_url, opts).await?;
+            for mut entry in entries {
+                let rel = if prefix.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{}/{}", prefix, entry.name)
+                };
+                entry.relative_path = Some(rel.clone());
+
+                if entry.is_directory {
+                    let child_url = format!("{}/{}", current_url.trim_end_matches('/'), entry.name);
+                    stack.push((child_url, rel, depth + 1));
+                }
+                result.push(entry);
+            }
+        }
+        Ok(result)
+    }
 }
 
 /// Resolve a URL string to the appropriate protocol handler.
