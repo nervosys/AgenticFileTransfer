@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -11,11 +12,25 @@ use crate::error::{AftError, AftResult};
 
 pub struct HttpHandler {
     scheme: String,
+    /// Cached client — avoids rebuilding connection pool on every request.
+    cached_client: Mutex<Option<Client>>,
 }
 
 impl HttpHandler {
     pub fn new(scheme: String) -> Self {
-        Self { scheme }
+        Self {
+            scheme,
+            cached_client: Mutex::new(None),
+        }
+    }
+    fn get_or_build_client(&self, opts: &ProtocolOptions) -> AftResult<Client> {
+        let mut guard = self.cached_client.lock().unwrap();
+        if let Some(ref client) = *guard {
+            return Ok(client.clone());
+        }
+        let client = self.build_client(opts)?;
+        *guard = Some(client.clone());
+        Ok(client)
     }
 
     fn build_client(&self, opts: &ProtocolOptions) -> AftResult<Client> {
@@ -80,7 +95,7 @@ impl ProtocolHandler for HttpHandler {
     }
 
     async fn head(&self, url: &str, opts: &ProtocolOptions) -> AftResult<ResourceMetadata> {
-        let client = self.build_client(opts)?;
+        let client = self.get_or_build_client(opts)?;
         let req = self.apply_auth(client.head(url), opts);
         let resp = req.send().await?;
 
@@ -147,7 +162,7 @@ impl ProtocolHandler for HttpHandler {
         resume_from: Option<u64>,
         progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
     ) -> AftResult<u64> {
-        let client = self.build_client(opts)?;
+        let client = self.get_or_build_client(opts)?;
         let mut req = self.apply_auth(client.get(url), opts);
 
         let mut bytes_already = 0u64;
@@ -170,7 +185,7 @@ impl ProtocolHandler for HttpHandler {
 
         let total_size = resp.content_length().map(|cl| cl + bytes_already);
 
-        let mut file = if resume_from.is_some() {
+        let file = if resume_from.is_some() {
             tokio::fs::OpenOptions::new()
                 .append(true)
                 .create(true)
@@ -182,6 +197,7 @@ impl ProtocolHandler for HttpHandler {
 
         let mut downloaded = bytes_already;
         let mut stream = resp.bytes_stream();
+        let mut file = tokio::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| AftError::TransferFailed(e.to_string()))?;
@@ -203,7 +219,7 @@ impl ProtocolHandler for HttpHandler {
         end: u64,
         opts: &ProtocolOptions,
     ) -> AftResult<Vec<u8>> {
-        let client = self.build_client(opts)?;
+        let client = self.get_or_build_client(opts)?;
         let req = self
             .apply_auth(client.get(url), opts)
             .header(reqwest::header::RANGE, format!("bytes={}-{}", start, end));
@@ -239,7 +255,7 @@ impl ProtocolHandler for HttpHandler {
         let file_size = tokio::fs::metadata(source).await?.len();
         let body = tokio::fs::read(source).await?;
 
-        let client = self.build_client(opts)?;
+        let client = self.get_or_build_client(opts)?;
         let method_str = method.unwrap_or("PUT");
         let http_method = method_str
             .parse::<reqwest::Method>()
