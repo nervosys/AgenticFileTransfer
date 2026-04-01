@@ -493,14 +493,14 @@ impl ServerState {
 /// Handle a fresh HELLO handshake: authenticate, negotiate capabilities, create
 /// a resumable session, and send HELLO_ACK with the session ID.
 ///
-/// Returns `(use_compression, max_payload, session_id)`.
+/// Returns `(use_compression, use_crc32, max_payload, session_id)`.
 async fn handle_hello_handshake<R, W>(
     state: &ServerState,
     reader: &mut BufReader<R>,
     writer: &mut BufWriter<W>,
     hello_frame: &Frame,
     addr: SocketAddr,
-) -> AftResult<(bool, u32, String)>
+) -> AftResult<(bool, bool, u32, String)>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
@@ -607,8 +607,11 @@ where
     }
     // Advertise session-resume support
     agreed_caps |= CAP_SESSION_RESUME;
+    // Always advertise hardware-accelerated CRC32 capability
+    agreed_caps |= CAP_CRC32_FRAMES;
 
     let use_compression = agreed_caps & CAP_COMPRESSION != 0;
+    let use_crc32 = agreed_caps & CAP_CRC32_FRAMES != 0;
 
     // Create a resumable session
     let session_id = {
@@ -621,19 +624,19 @@ where
     writer.flush().await?;
 
     let max_payload = state.max_frame_size + 1024;
-    Ok((use_compression, max_payload, session_id))
+    Ok((use_compression, use_crc32, max_payload, session_id))
 }
 
 /// Handle a RESUME handshake: look up the session, verify ownership, and send
 /// RESUME_ACK with the byte offset the server already has.
 ///
-/// Returns `(use_compression, max_payload, session_id)`.
+/// Returns `(use_compression, use_crc32, max_payload, session_id)`.
 async fn handle_resume_handshake<W>(
     state: &ServerState,
     writer: &mut BufWriter<W>,
     resume_frame: &Frame,
     addr: SocketAddr,
-) -> AftResult<(bool, u32, String)>
+) -> AftResult<(bool, bool, u32, String)>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -686,8 +689,15 @@ where
     // assume the same settings as the original HELLO (the session store
     // records authenticated status; compression is server-wide).
     let use_compression = state.compression;
+    // CRC32 is always available (hardware-accelerated)
+    let use_crc32 = resume_data.capabilities & CAP_CRC32_FRAMES != 0;
     let max_payload = state.max_frame_size + 1024;
-    Ok((use_compression, max_payload, resume_data.session_id))
+    Ok((
+        use_compression,
+        use_crc32,
+        max_payload,
+        resume_data.session_id,
+    ))
 }
 
 // ── Connection handler ──────────────────────────────────────────────────────
@@ -708,7 +718,7 @@ where
     // ── Handshake (HELLO or RESUME) ─────────────────────────────────────
     let first_frame = read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?;
 
-    let (use_compression, max_payload, session_id) = match first_frame.frame_type {
+    let (use_compression, use_crc32, max_payload, session_id) = match first_frame.frame_type {
         FRAME_HELLO => {
             handle_hello_handshake(&state, &mut reader, &mut writer, &first_frame, addr).await?
         }
@@ -751,6 +761,7 @@ where
                     &mut writer,
                     &frame,
                     use_compression,
+                    use_crc32,
                     addr,
                 )
                 .await?;
@@ -765,6 +776,7 @@ where
                     &mut writer,
                     &frame,
                     max_payload,
+                    use_crc32,
                     addr,
                     &session_id,
                 )
@@ -799,6 +811,7 @@ async fn handle_get<R, W>(
     writer: &mut BufWriter<W>,
     frame: &Frame,
     use_compression: bool,
+    use_crc32: bool,
     addr: SocketAddr,
 ) -> AftResult<()>
 where
@@ -872,14 +885,28 @@ where
         if use_compression {
             if let Ok(compressed) = zstd::encode_all(std::io::Cursor::new(&buf[..n]), 1) {
                 if compressed.len() < n {
-                    write_frame_header(
-                        writer,
-                        FRAME_DATA,
-                        FLAG_COMPRESSED,
-                        compressed.len() as u32,
-                    )
-                    .await?;
-                    writer.write_all(&compressed).await?;
+                    if use_crc32 {
+                        let crc = crc32fast::hash(&compressed);
+                        let frame_len = compressed.len() as u32 + 4;
+                        write_frame_header(
+                            writer,
+                            FRAME_DATA,
+                            FLAG_COMPRESSED | FLAG_CRC32,
+                            frame_len,
+                        )
+                        .await?;
+                        writer.write_all(&compressed).await?;
+                        writer.write_all(&crc.to_le_bytes()).await?;
+                    } else {
+                        write_frame_header(
+                            writer,
+                            FRAME_DATA,
+                            FLAG_COMPRESSED,
+                            compressed.len() as u32,
+                        )
+                        .await?;
+                        writer.write_all(&compressed).await?;
+                    }
                     total_sent += n as u64;
                     continue;
                 }
@@ -887,8 +914,16 @@ where
         }
 
         // Uncompressed: write header then raw data (zero-copy path)
-        write_frame_header(writer, FRAME_DATA, 0, n as u32).await?;
-        writer.write_all(&buf[..n]).await?;
+        if use_crc32 {
+            let crc = crc32fast::hash(&buf[..n]);
+            let frame_len = n as u32 + 4;
+            write_frame_header(writer, FRAME_DATA, FLAG_CRC32, frame_len).await?;
+            writer.write_all(&buf[..n]).await?;
+            writer.write_all(&crc.to_le_bytes()).await?;
+        } else {
+            write_frame_header(writer, FRAME_DATA, 0, n as u32).await?;
+            writer.write_all(&buf[..n]).await?;
+        }
         total_sent += n as u64;
     }
 
@@ -960,12 +995,14 @@ async fn handle_head<W: tokio::io::AsyncWrite + Unpin>(
 
 // ── PUT handler ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_put<R, W>(
     state: &ServerState,
     reader: &mut BufReader<R>,
     writer: &mut BufWriter<W>,
     frame: &Frame,
     max_payload: u32,
+    use_crc32: bool,
     addr: SocketAddr,
     session_id: &str,
 ) -> AftResult<()>
@@ -1005,11 +1042,18 @@ where
 
         match data_frame.frame_type {
             FRAME_DATA => {
-                let payload = if data_frame.flags & FLAG_COMPRESSED != 0 {
-                    zstd::decode_all(std::io::Cursor::new(&data_frame.payload))
-                        .map_err(|e| AftError::Other(format!("zstd decompress error: {}", e)))?
+                // Verify per-frame CRC32 if present (hardware-accelerated)
+                let raw_payload = if use_crc32 && data_frame.flags & FLAG_CRC32 != 0 {
+                    let data_len = verify_frame_crc32(&data_frame.payload)?;
+                    data_frame.payload[..data_len].to_vec()
                 } else {
                     data_frame.payload
+                };
+                let payload = if data_frame.flags & FLAG_COMPRESSED != 0 {
+                    zstd::decode_all(std::io::Cursor::new(&raw_payload))
+                        .map_err(|e| AftError::Other(format!("zstd decompress error: {}", e)))?
+                } else {
+                    raw_payload
                 };
                 hasher.update(&payload);
                 file.write_all(&payload).await?;

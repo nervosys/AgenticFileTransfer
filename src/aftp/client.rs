@@ -115,10 +115,17 @@ impl AftpClient {
     }
 
     /// Open connection and perform HELLO handshake.
-    /// Returns (reader, writer, negotiated_max_frame, use_compression, session_id).
+    /// Returns (reader, writer, negotiated_max_frame, use_compression, use_crc32, session_id).
     async fn connect(
         &self,
-    ) -> AftResult<(BufReader<BoxRead>, BufWriter<BoxWrite>, u32, bool, String)> {
+    ) -> AftResult<(
+        BufReader<BoxRead>,
+        BufWriter<BoxWrite>,
+        u32,
+        bool,
+        bool,
+        String,
+    )> {
         let addr = format!("{}:{}", self.host, self.port);
         let stream = TcpStream::connect(&addr)
             .await
@@ -148,7 +155,7 @@ impl AftpClient {
         };
 
         // Send HELLO
-        let mut caps = CAP_COMPRESSION | CAP_CHECKSUM;
+        let mut caps = CAP_COMPRESSION | CAP_CHECKSUM | CAP_CRC32_FRAMES;
         if self.use_challenge_auth {
             caps |= CAP_AUTH_CHALLENGE;
         }
@@ -201,6 +208,7 @@ impl AftpClient {
 
         let ack_data = parse_hello_ack(&ack.payload)?;
         let use_compression = ack_data.capabilities & CAP_COMPRESSION != 0;
+        let use_crc32 = ack_data.capabilities & CAP_CRC32_FRAMES != 0;
         let session_id = ack_data.session_id;
 
         Ok((
@@ -208,12 +216,13 @@ impl AftpClient {
             writer,
             ack_data.max_frame_size,
             use_compression,
+            use_crc32,
             session_id,
         ))
     }
 
     /// Open connection and resume a previous session.
-    /// Returns (reader, writer, max_frame, use_compression, resume_offset, resume_path).
+    /// Returns (reader, writer, max_frame, use_compression, use_crc32, resume_offset, resume_path).
     #[allow(dead_code)]
     async fn resume_connect(
         &self,
@@ -222,6 +231,7 @@ impl AftpClient {
         BufReader<BoxRead>,
         BufWriter<BoxWrite>,
         u32,
+        bool,
         bool,
         u64,
         String,
@@ -255,7 +265,7 @@ impl AftpClient {
         };
 
         // Send RESUME frame
-        let mut caps = CAP_COMPRESSION | CAP_CHECKSUM | CAP_SESSION_RESUME;
+        let mut caps = CAP_COMPRESSION | CAP_CHECKSUM | CAP_SESSION_RESUME | CAP_CRC32_FRAMES;
         if self.use_challenge_auth {
             caps |= CAP_AUTH_CHALLENGE;
         }
@@ -285,7 +295,8 @@ impl AftpClient {
 
         // Inherit compression setting from the original connection
         let use_compression = true; // server advertised in original HELLO_ACK
-                                    // Use the server's max frame as a safe default
+        let use_crc32 = true; // CRC32 always available
+                              // Use the server's max frame as a safe default
         let max_frame = DEFAULT_MAX_FRAME;
 
         Ok((
@@ -293,6 +304,7 @@ impl AftpClient {
             writer,
             max_frame,
             use_compression,
+            use_crc32,
             ack_data.bytes_received,
             ack_data.path,
         ))
@@ -311,7 +323,7 @@ impl AftpClient {
         let file_meta = tokio::fs::metadata(source).await?;
         let file_size = file_meta.len();
 
-        let (mut reader, mut writer, max_frame, use_compress, byte_offset, _path) =
+        let (mut reader, mut writer, max_frame, use_compress, _use_crc32, byte_offset, _path) =
             self.resume_connect(session_id).await?;
 
         // Seek past what the server already has
@@ -429,7 +441,7 @@ impl AftpClient {
     // ── HEAD ────────────────────────────────────────────────────────────────
 
     pub async fn head(&self, path: &str) -> AftResult<AftpFileInfo> {
-        let (mut reader, mut writer, max_frame, _, _session_id) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _, _, _session_id) = self.connect().await?;
 
         let payload = build_head(path);
         write_frame(&mut writer, &Frame::new(FRAME_HEAD, payload)).await?;
@@ -453,7 +465,7 @@ impl AftpClient {
         dest: &Path,
         progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     ) -> AftResult<u64> {
-        let (mut reader, mut writer, max_frame, _use_compress, _session_id) =
+        let (mut reader, mut writer, max_frame, _use_compress, use_crc32, _session_id) =
             self.connect().await?;
 
         // Send GET (full file)
@@ -479,11 +491,18 @@ impl AftpClient {
             let frame = read_frame(&mut reader, max_frame + 1024).await?;
             match frame.frame_type {
                 FRAME_DATA => {
-                    let data = if frame.flags & FLAG_COMPRESSED != 0 {
-                        zstd::decode_all(Cursor::new(&frame.payload))
-                            .map_err(|e| AftError::Other(format!("zstd error: {}", e)))?
+                    // Verify per-frame CRC32 if present (hardware-accelerated)
+                    let raw_payload = if use_crc32 && frame.flags & FLAG_CRC32 != 0 {
+                        let data_len = verify_frame_crc32(&frame.payload)?;
+                        frame.payload[..data_len].to_vec()
                     } else {
                         frame.payload
+                    };
+                    let data = if frame.flags & FLAG_COMPRESSED != 0 {
+                        zstd::decode_all(Cursor::new(&raw_payload))
+                            .map_err(|e| AftError::Other(format!("zstd error: {}", e)))?
+                    } else {
+                        raw_payload
                     };
                     hasher.update(&data);
                     tokio::io::AsyncWriteExt::write_all(&mut file, &data).await?;
@@ -532,7 +551,7 @@ impl AftpClient {
     // ── DOWNLOAD RANGE ──────────────────────────────────────────────────────
 
     pub async fn download_range(&self, path: &str, start: u64, end: u64) -> AftResult<Vec<u8>> {
-        let (mut reader, mut writer, max_frame, _, _session_id) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _, use_crc32, _session_id) = self.connect().await?;
 
         let payload = build_get(path, start, end);
         write_frame(&mut writer, &Frame::new(FRAME_GET, payload)).await?;
@@ -548,11 +567,18 @@ impl AftpClient {
             let frame = read_frame(&mut reader, max_frame + 1024).await?;
             match frame.frame_type {
                 FRAME_DATA => {
-                    let data = if frame.flags & FLAG_COMPRESSED != 0 {
-                        zstd::decode_all(Cursor::new(&frame.payload))
-                            .map_err(|e| AftError::Other(format!("zstd error: {}", e)))?
+                    // Verify per-frame CRC32 if present (hardware-accelerated)
+                    let raw_payload = if use_crc32 && frame.flags & FLAG_CRC32 != 0 {
+                        let data_len = verify_frame_crc32(&frame.payload)?;
+                        frame.payload[..data_len].to_vec()
                     } else {
                         frame.payload
+                    };
+                    let data = if frame.flags & FLAG_COMPRESSED != 0 {
+                        zstd::decode_all(Cursor::new(&raw_payload))
+                            .map_err(|e| AftError::Other(format!("zstd error: {}", e)))?
+                    } else {
+                        raw_payload
                     };
                     result.extend_from_slice(&data);
                 }
@@ -584,7 +610,8 @@ impl AftpClient {
         let file_meta = tokio::fs::metadata(source).await?;
         let file_size = file_meta.len();
 
-        let (mut reader, mut writer, max_frame, use_compress, _session_id) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, use_compress, use_crc32, _session_id) =
+            self.connect().await?;
 
         // Send PUT request
         let payload = build_put(remote_path, file_size);
@@ -617,11 +644,26 @@ impl AftpClient {
             if use_compress {
                 if let Ok(compressed) = zstd::encode_all(Cursor::new(&buf[..n]), 1) {
                     if compressed.len() < n {
-                        write_frame(
-                            &mut writer,
-                            &Frame::with_flags(FRAME_DATA, FLAG_COMPRESSED, compressed),
-                        )
-                        .await?;
+                        if use_crc32 {
+                            let crc = crc32fast::hash(&compressed);
+                            let mut payload = compressed;
+                            payload.extend_from_slice(&crc.to_le_bytes());
+                            write_frame(
+                                &mut writer,
+                                &Frame::with_flags(
+                                    FRAME_DATA,
+                                    FLAG_COMPRESSED | FLAG_CRC32,
+                                    payload,
+                                ),
+                            )
+                            .await?;
+                        } else {
+                            write_frame(
+                                &mut writer,
+                                &Frame::with_flags(FRAME_DATA, FLAG_COMPRESSED, compressed),
+                            )
+                            .await?;
+                        }
                         total_sent += n as u64;
                         if let Some(cb) = &progress {
                             cb(total_sent, Some(file_size));
@@ -631,8 +673,16 @@ impl AftpClient {
                 }
             }
 
-            write_frame_header(&mut writer, FRAME_DATA, 0, n as u32).await?;
-            writer.write_all(&buf[..n]).await?;
+            if use_crc32 {
+                let crc = crc32fast::hash(&buf[..n]);
+                let frame_len = n as u32 + 4;
+                write_frame_header(&mut writer, FRAME_DATA, FLAG_CRC32, frame_len).await?;
+                writer.write_all(&buf[..n]).await?;
+                writer.write_all(&crc.to_le_bytes()).await?;
+            } else {
+                write_frame_header(&mut writer, FRAME_DATA, 0, n as u32).await?;
+                writer.write_all(&buf[..n]).await?;
+            }
             total_sent += n as u64;
             if let Some(cb) = &progress {
                 cb(total_sent, Some(file_size));
@@ -660,7 +710,7 @@ impl AftpClient {
     // ── LIST ────────────────────────────────────────────────────────────────
 
     pub async fn list(&self, path: &str) -> AftResult<Vec<AftpDirEntry>> {
-        let (mut reader, mut writer, max_frame, _, _session_id) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _, _, _session_id) = self.connect().await?;
 
         let payload = build_list(path);
         write_frame(&mut writer, &Frame::new(FRAME_LIST, payload)).await?;

@@ -94,6 +94,9 @@ pqc_kyber = { version = "0.7", features = ["kyber1024"] }
 # AES-256-GCM authenticated encryption
 aes-gcm = "0.10"
 
+# Hardware-accelerated CRC32 (SSE4.2 on x86_64, CRC32 on aarch64)
+crc32fast = "1.4"
+
 # Self-signed cert generation for QUIC dev mode
 rcgen = "0.13"
 

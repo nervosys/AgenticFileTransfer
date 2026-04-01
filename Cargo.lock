@@ -54,6 +54,7 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "crc32fast",
  "dirs",
  "futures",
  "hex",
