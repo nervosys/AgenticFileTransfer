@@ -12,6 +12,15 @@
 //!
 //! Designed for maximum throughput: 10 bytes of overhead per 1 MB data frame
 //! yields 0.001% framing cost, compared to HTTP's 0.02–0.08%.
+//!
+//! ## Hardware acceleration
+//!
+//! - **CRC32**: Per-frame integrity via `crc32fast` — auto-detects SSE4.2 (x86_64)
+//!   and CRC32 (aarch64) hardware instructions (~30 GB/s).
+//! - **SHA-256**: Transfer-level integrity via `sha2` — auto-detects SHA-NI (x86_64)
+//!   and SHA2 (aarch64) extensions.
+//! - **AES-256-GCM**: Crypto subsystem via `aes-gcm` — auto-detects AES-NI.
+//! - **Zstd**: Compression via libzstd C library — uses SIMD internally.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -48,6 +57,9 @@ pub const FRAME_RESUME_ACK: u8 = 0x15;
 
 // Flags
 pub const FLAG_COMPRESSED: u8 = 0x01;
+/// Per-frame CRC32 integrity check (hardware-accelerated via SSE4.2 / ARM CRC32).
+/// When set, the last 4 bytes of the payload are a CRC32 of the preceding bytes.
+pub const FLAG_CRC32: u8 = 0x02;
 
 // Capabilities (bitmask in HELLO/HELLO_ACK)
 pub const CAP_COMPRESSION: u32 = 0x01;
@@ -57,6 +69,8 @@ pub const CAP_AUTH_CHALLENGE: u32 = 0x04;
 #[allow(dead_code)] // Protocol spec
 pub const CAP_MULTIPLEX: u32 = 0x08;
 pub const CAP_SESSION_RESUME: u32 = 0x10;
+/// Hardware-accelerated per-frame CRC32 integrity (SSE4.2 / ARM CRC32C).
+pub const CAP_CRC32_FRAMES: u32 = 0x20;
 
 // Defaults
 pub const DEFAULT_PORT: u16 = 2600;
@@ -71,6 +85,9 @@ pub const CHECKSUM_NONE: u8 = 0;
 pub const CHECKSUM_SHA256: u8 = 1;
 #[allow(dead_code)] // Protocol spec — reserved for SHA-512 checksum support
 pub const CHECKSUM_SHA512: u8 = 2;
+/// Hardware-accelerated CRC32 checksum (non-cryptographic, ~30 GB/s).
+#[allow(dead_code)] // Protocol spec — available for negotiated fast-path integrity
+pub const CHECKSUM_CRC32: u8 = 3;
 
 // Error codes in ERROR frames
 pub const ERR_NOT_FOUND: u16 = 1;
@@ -187,6 +204,29 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, frame: &Frame) -> Aft
         w.write_all(&frame.payload).await?;
     }
     Ok(())
+}
+
+/// Verify per-frame CRC32: the last 4 payload bytes must equal the CRC32 of the
+/// preceding bytes. Returns the data length (payload.len() - 4) on success.
+pub fn verify_frame_crc32(payload: &[u8]) -> AftResult<usize> {
+    if payload.len() < 4 {
+        return Err(AftError::Other("Frame too short for CRC32 trailer".into()));
+    }
+    let data_len = payload.len() - 4;
+    let expected = u32::from_le_bytes([
+        payload[data_len],
+        payload[data_len + 1],
+        payload[data_len + 2],
+        payload[data_len + 3],
+    ]);
+    let actual = crc32fast::hash(&payload[..data_len]);
+    if expected != actual {
+        return Err(AftError::Other(format!(
+            "Frame CRC32 mismatch: expected 0x{:08X}, got 0x{:08X}",
+            expected, actual
+        )));
+    }
+    Ok(data_len)
 }
 
 /// Write only the header — caller writes payload bytes separately for zero-copy.

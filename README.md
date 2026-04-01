@@ -587,4 +587,4 @@ This software has been publicly released and a notification has been submitted t
 This project is dual-licensed:
 
 - **AGPL-3.0-or-later** — Free for open-source use under the terms of the [GNU Affero General Public License v3.0](LICENSE).
-- **Commercial License** — For proprietary/commercial use without AGPL obligations, contact [Nervosys](https://nervosys.com) for a commercial license.
+- **Commercial License** — For proprietary/commercial use without AGPL obligations, contact [NERVOSYS](https://nervosys.ai) for a commercial license.

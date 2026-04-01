@@ -10,6 +10,14 @@
 //!   neural network bulk encryption.
 //!
 //! Also provides DoD classification level enforcement.
+//!
+//! ## Hardware acceleration
+//!
+//! - **AES-256-GCM**: via `aes-gcm` — auto-detects AES-NI (x86_64) and
+//!   ARM AES extensions.
+//! - **SHA-256**: via `sha2` — auto-detects SHA-NI (x86_64) and SHA2 (aarch64).
+//! - **XOR bulk masking**: widened to `u64` operations for hardware-friendly
+//!   throughput in the Hybrid encryption path.
 
 pub mod classification;
 pub mod neural;
@@ -18,6 +26,44 @@ pub mod pqc;
 use std::path::Path;
 
 use crate::error::{AftError, AftResult};
+
+/// XOR `data` with `key` (repeated), processing in u64 chunks for throughput.
+/// Falls back to byte-at-a-time for the remainder and short keys.
+fn xor_with_key(data: &[u8], key: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; data.len()];
+    let key_len = key.len();
+    if key_len == 0 {
+        out.copy_from_slice(data);
+        return out;
+    }
+
+    // Build a key buffer that is a multiple of 8 bytes for u64 processing.
+    // Repeat the key enough times to fill at least 8 bytes.
+    let expanded_len = key_len.max(8).next_multiple_of(key_len);
+    let mut expanded_key = Vec::with_capacity(expanded_len);
+    while expanded_key.len() < expanded_len {
+        expanded_key.extend_from_slice(key);
+    }
+    expanded_key.truncate(expanded_len);
+
+    let chunks8 = data.len() / 8;
+    let remainder = data.len() % 8;
+
+    for i in 0..chunks8 {
+        let di = i * 8;
+        let ki = di % expanded_len;
+        let d = u64::from_le_bytes(data[di..di + 8].try_into().unwrap());
+        let k = u64::from_le_bytes(expanded_key[ki..ki + 8].try_into().unwrap());
+        out[di..di + 8].copy_from_slice(&(d ^ k).to_le_bytes());
+    }
+
+    let base = chunks8 * 8;
+    for j in 0..remainder {
+        out[base + j] = data[base + j] ^ key[(base + j) % key_len];
+    }
+
+    out
+}
 
 /// Encryption method selector.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -106,11 +152,8 @@ pub async fn encrypt_file(
                 ..Default::default()
             });
             // XOR plaintext with repeated shared secret, then neural-encrypt
-            let masked: Vec<u8> = plaintext
-                .iter()
-                .enumerate()
-                .map(|(i, &b)| b ^ shared_secret[i % shared_secret.len()])
-                .collect();
+            // Process in u64 chunks for hardware-friendly throughput
+            let masked = xor_with_key(&plaintext, &shared_secret);
             let ct = cipher.encrypt(&masked);
             (kem_ct, ct)
         }
@@ -201,11 +244,9 @@ pub async fn decrypt_file(input: &Path, output: &Path, key_file: &Path) -> AftRe
                 ..Default::default()
             });
             let masked = cipher.decrypt(ciphertext);
-            masked
-                .iter()
-                .enumerate()
-                .map(|(i, &b)| b ^ shared_secret[i % shared_secret.len()])
-                .collect()
+            // XOR with shared secret to recover plaintext
+            // (u64-widened for hardware-friendly throughput)
+            xor_with_key(&masked, &shared_secret)
         }
     };
 
