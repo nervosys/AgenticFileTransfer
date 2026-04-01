@@ -97,10 +97,16 @@ pub async fn download(
     };
 
     // Probe server for metadata
-    let metadata = handler.head(url, opts).await.ok();
-    let total_size = metadata.as_ref().and_then(|m| m.content_length);
-    let supports_ranges = metadata.as_ref().map(|m| m.accepts_ranges).unwrap_or(false);
-
+    // Skip HEAD probe when parallel_chunks <= 1 (turbo already probed)
+    let (total_size, supports_ranges) = if config.parallel_chunks > 1 {
+        let metadata = handler.head(url, opts).await.ok();
+        (
+            metadata.as_ref().and_then(|m| m.content_length),
+            metadata.as_ref().map(|m| m.accepts_ranges).unwrap_or(false),
+        )
+    } else {
+        (None, false)
+    };
     // Decide between parallel chunked download and single-stream
     let use_chunks = supports_ranges
         && config.parallel_chunks > 1

@@ -61,6 +61,32 @@ impl ProtocolHandler for LocalHandler {
         progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
     ) -> AftResult<u64> {
         let source_path = url_to_path(url);
+
+        // Fast path: kernel-level copy when no resume is needed.
+        if resume_from.is_none() {
+            let sp = source_path.clone();
+            let dp = dest.to_path_buf();
+            let cb = progress;
+            let copied = tokio::task::spawn_blocking(move || -> AftResult<u64> {
+                let n = std::fs::copy(&sp, &dp)
+                    .map_err(|e| match e.kind() {
+                        std::io::ErrorKind::NotFound => AftError::FileNotFound(sp.clone()),
+                        std::io::ErrorKind::PermissionDenied => {
+                            AftError::PermissionDenied(sp.clone())
+                        }
+                        _ => AftError::Io(e),
+                    })?;
+                if let Some(ref cb) = cb {
+                    cb(n, Some(n));
+                }
+                Ok(n)
+            })
+            .await
+            .map_err(|e| AftError::Other(format!("spawn_blocking: {}", e)))??;
+            return Ok(copied);
+        }
+
+        // Resume path: buffered async I/O
         let mut source = tokio::fs::File::open(&source_path)
             .await
             .map_err(|e| match e.kind() {
@@ -70,39 +96,25 @@ impl ProtocolHandler for LocalHandler {
                 }
                 _ => AftError::Io(e),
             })?;
-
         let total_size = source.metadata().await?.len();
         let mut bytes_written = 0u64;
-
         if let Some(offset) = resume_from {
             use tokio::io::AsyncSeekExt;
             source.seek(std::io::SeekFrom::Start(offset)).await?;
             bytes_written = offset;
         }
-
-        let mut dest_file = if resume_from.is_some() {
-            tokio::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(dest)
-                .await?
-        } else {
-            tokio::fs::File::create(dest).await?
-        };
-
-        let mut buf = vec![0u8; 256 * 1024]; // 256KB buffer for throughput
+        let mut dest_file = tokio::fs::OpenOptions::new()
+            .append(true).create(true).open(dest).await?;
+        let mut buf = vec![0u8; 4 * 1024 * 1024];
         loop {
             let n = source.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
+            if n == 0 { break; }
             dest_file.write_all(&buf[..n]).await?;
             bytes_written += n as u64;
             if let Some(ref cb) = progress {
                 cb(bytes_written, Some(total_size));
             }
         }
-
         dest_file.flush().await?;
         Ok(bytes_written)
     }
@@ -139,27 +151,20 @@ impl ProtocolHandler for LocalHandler {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let mut src = tokio::fs::File::open(source).await?;
-        let total = src.metadata().await?.len();
-        let mut dst = tokio::fs::File::create(&dest_path).await?;
-
-        let mut buf = vec![0u8; 256 * 1024];
-        let mut written = 0u64;
-
-        loop {
-            let n = src.read(&mut buf).await?;
-            if n == 0 {
-                break;
+        // Fast path: kernel-level copy
+        let sp = source.to_path_buf();
+        let dp = dest_path.clone();
+        let cb = progress;
+        let copied = tokio::task::spawn_blocking(move || -> AftResult<u64> {
+            let n = std::fs::copy(&sp, &dp).map_err(AftError::Io)?;
+            if let Some(ref cb) = cb {
+                cb(n, Some(n));
             }
-            dst.write_all(&buf[..n]).await?;
-            written += n as u64;
-            if let Some(ref cb) = progress {
-                cb(written, Some(total));
-            }
-        }
-
-        dst.flush().await?;
-        Ok(written)
+            Ok(n)
+        })
+        .await
+        .map_err(|e| AftError::Other(format!("spawn_blocking: {}", e)))??;
+        Ok(copied)
     }
 
     async fn list(&self, url: &str, _opts: &ProtocolOptions) -> AftResult<Vec<DirectoryEntry>> {
