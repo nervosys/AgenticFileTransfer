@@ -3999,3 +3999,462 @@ mod output_extended_tests {
         assert!(formatted.contains("1024"));
     }
 }
+
+// ── Extended local protocol operations ─────────────────────────────────
+
+mod local_extended_ops_tests {
+    use aft::protocols::local::LocalHandler;
+    use aft::protocols::{ProtocolHandler, ProtocolOptions};
+    use std::fs;
+
+    fn opts() -> ProtocolOptions {
+        ProtocolOptions::default()
+    }
+
+    fn file_url(path: &std::path::Path) -> String {
+        format!("file://{}", path.to_str().unwrap().replace('\\', "/"))
+    }
+
+    #[tokio::test]
+    async fn local_mkdir_creates_nested_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = LocalHandler;
+        let target = dir.path().join("a").join("b").join("c");
+        handler.mkdir(&file_url(&target), &opts()).await.unwrap();
+        assert!(target.exists());
+        assert!(target.is_dir());
+    }
+
+    #[tokio::test]
+    async fn local_exists_true_for_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = LocalHandler;
+        let f = dir.path().join("exists.txt");
+        fs::write(&f, "data").unwrap();
+        assert!(handler.exists(&file_url(&f), &opts()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_exists_false_for_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = LocalHandler;
+        let f = dir.path().join("nope.txt");
+        assert!(!handler.exists(&file_url(&f), &opts()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_delete_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = LocalHandler;
+        let f = dir.path().join("deleteme.txt");
+        fs::write(&f, "gone").unwrap();
+        assert!(f.exists());
+        handler.delete(&file_url(&f), false, &opts()).await.unwrap();
+        assert!(!f.exists());
+    }
+
+    #[tokio::test]
+    async fn local_delete_dir_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = LocalHandler;
+        let sub = dir.path().join("parent").join("child");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("file.txt"), "x").unwrap();
+        let target = dir.path().join("parent");
+        handler.delete(&file_url(&target), true, &opts()).await.unwrap();
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn local_rename_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = LocalHandler;
+        let src = dir.path().join("old.txt");
+        let dst = dir.path().join("new.txt");
+        fs::write(&src, "renamed").unwrap();
+        handler.rename(&file_url(&src), &file_url(&dst), &opts()).await.unwrap();
+        assert!(!src.exists());
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "renamed");
+    }
+
+    #[tokio::test]
+    async fn local_rename_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = LocalHandler;
+        let src = dir.path().join("move.txt");
+        let dst = dir.path().join("deep").join("dir").join("moved.txt");
+        fs::write(&src, "moved").unwrap();
+        handler.rename(&file_url(&src), &file_url(&dst), &opts()).await.unwrap();
+        assert!(!src.exists());
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "moved");
+    }
+
+    #[tokio::test]
+    async fn local_set_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = LocalHandler;
+        let f = dir.path().join("ts.txt");
+        fs::write(&f, "timestamp test").unwrap();
+        let mtime = chrono::DateTime::parse_from_rfc3339("2020-06-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        handler.set_timestamps(&file_url(&f), mtime, &opts()).await.unwrap();
+        let meta = fs::metadata(&f).unwrap();
+        let actual = meta.modified().unwrap();
+        let expected = std::time::SystemTime::from(mtime);
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn local_supports_extended_ops() {
+        let handler = LocalHandler;
+        assert!(handler.supports_extended_ops());
+    }
+
+    #[tokio::test]
+    async fn local_list_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = LocalHandler;
+        let sub = dir.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(dir.path().join("root.txt"), "r").unwrap();
+        fs::write(sub.join("child.txt"), "c").unwrap();
+
+        let entries = handler
+            .list_recursive(&file_url(dir.path()), &opts(), 10)
+            .await
+            .unwrap();
+        let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&"root.txt".to_string()));
+        assert!(names.contains(&"child.txt".to_string()));
+        assert!(names.contains(&"sub".to_string()));
+    }
+}
+
+// ── Sync engine integration tests ──────────────────────────────────────
+
+mod sync_engine_tests {
+    use aft::protocols::local::LocalHandler;
+    use aft::protocols::ProtocolOptions;
+    use aft::sync::{CompareMode, SyncConfig, SyncActionKind};
+    use std::fs;
+
+    fn opts() -> ProtocolOptions {
+        ProtocolOptions::default()
+    }
+
+    fn file_url(path: &std::path::Path) -> String {
+        format!("file://{}", path.to_str().unwrap().replace('\\', "/"))
+    }
+
+    #[tokio::test]
+    async fn sync_copies_new_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("hello.txt"), "hello world").unwrap();
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &handler, &file_url(&src),
+            &handler, &file_url(&dst),
+            &opts(), &config, None,
+        ).await.unwrap();
+
+        assert_eq!(result.files_copied, 1);
+        assert_eq!(fs::read_to_string(dst.join("hello.txt")).unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn sync_skips_identical_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("same.txt"), "identical").unwrap();
+        fs::write(dst.join("same.txt"), "identical").unwrap();
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &handler, &file_url(&src),
+            &handler, &file_url(&dst),
+            &opts(), &config, None,
+        ).await.unwrap();
+
+        // Size-mode: same length → skip
+        assert_eq!(result.files_skipped, 1);
+        assert_eq!(result.files_copied, 0);
+    }
+
+    #[tokio::test]
+    async fn sync_creates_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        let sub = src.join("nested").join("deep");
+        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(sub.join("file.txt"), "deep content").unwrap();
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &handler, &file_url(&src),
+            &handler, &file_url(&dst),
+            &opts(), &config, None,
+        ).await.unwrap();
+
+        assert!(result.dirs_created > 0);
+        assert_eq!(result.files_copied, 1);
+        assert_eq!(
+            fs::read_to_string(dst.join("nested").join("deep").join("file.txt")).unwrap(),
+            "deep content"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_dry_run_does_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("nodry.txt"), "should not appear").unwrap();
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            dry_run: true,
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &handler, &file_url(&src),
+            &handler, &file_url(&dst),
+            &opts(), &config, None,
+        ).await.unwrap();
+
+        assert_eq!(result.files_copied, 1); // Counted but not executed
+        assert!(!dst.join("nodry.txt").exists()); // File NOT created
+    }
+
+    #[tokio::test]
+    async fn sync_delete_removes_extraneous() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("keep.txt"), "keep").unwrap();
+        fs::write(dst.join("keep.txt"), "keep").unwrap();
+        fs::write(dst.join("extra.txt"), "should be deleted").unwrap();
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            delete: true,
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &handler, &file_url(&src),
+            &handler, &file_url(&dst),
+            &opts(), &config, None,
+        ).await.unwrap();
+
+        assert_eq!(result.files_deleted, 1);
+        assert!(!dst.join("extra.txt").exists());
+        assert!(dst.join("keep.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_include_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("yes.txt"), "include").unwrap();
+        fs::write(src.join("no.rs"), "exclude").unwrap();
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            include: vec!["*.txt".to_string()],
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &handler, &file_url(&src),
+            &handler, &file_url(&dst),
+            &opts(), &config, None,
+        ).await.unwrap();
+
+        assert_eq!(result.files_copied, 1);
+        assert!(dst.join("yes.txt").exists());
+        assert!(!dst.join("no.rs").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_exclude_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("keep.txt"), "keep").unwrap();
+        fs::write(src.join("skip.log"), "skip").unwrap();
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            exclude: vec!["*.log".to_string()],
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &handler, &file_url(&src),
+            &handler, &file_url(&dst),
+            &opts(), &config, None,
+        ).await.unwrap();
+
+        assert_eq!(result.files_copied, 1);
+        assert!(dst.join("keep.txt").exists());
+        assert!(!dst.join("skip.log").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_result_has_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a.txt"), "aaa").unwrap();
+        fs::write(src.join("b.txt"), "bbb").unwrap();
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &handler, &file_url(&src),
+            &handler, &file_url(&dst),
+            &opts(), &config, None,
+        ).await.unwrap();
+
+        assert_eq!(result.files_copied, 2);
+        let copy_actions: Vec<_> = result.actions.iter()
+            .filter(|a| a.kind == SyncActionKind::Copy)
+            .collect();
+        assert_eq!(copy_actions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sync_size_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("small.txt"), "x").unwrap();           // 1 byte
+        fs::write(src.join("big.txt"), "x".repeat(1000)).unwrap(); // 1000 bytes
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            min_size: Some(10),
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &handler, &file_url(&src),
+            &handler, &file_url(&dst),
+            &opts(), &config, None,
+        ).await.unwrap();
+
+        assert_eq!(result.files_copied, 1);
+        assert!(dst.join("big.txt").exists());
+        assert!(!dst.join("small.txt").exists());
+    }
+}
+
+// ── CLI new subcommands ────────────────────────────────────────────────
+
+mod cli_new_subcommands_tests {
+    use std::process::Command;
+
+    fn aft_bin() -> Command {
+        Command::new(env!("CARGO_BIN_EXE_aft"))
+    }
+
+    #[test]
+    fn cli_sync_help() {
+        let output = aft_bin().args(["sync", "--help"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("source") || stdout.contains("SOURCE"));
+    }
+
+    #[test]
+    fn cli_mv_help() {
+        let output = aft_bin().args(["mv", "--help"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("source") || stdout.contains("SOURCE"));
+    }
+
+    #[test]
+    fn cli_rm_help() {
+        let output = aft_bin().args(["rm", "--help"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("url") || stdout.contains("URL"));
+    }
+
+    #[test]
+    fn cli_mkdir_help() {
+        let output = aft_bin().args(["mkdir", "--help"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("url") || stdout.contains("URL"));
+    }
+
+    #[test]
+    fn cli_sync_dry_run_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("test.txt"), "data").unwrap();
+
+        let src_url = format!("file://{}", src.to_str().unwrap().replace('\\', "/"));
+        let dst_url = format!("file://{}", dst.to_str().unwrap().replace('\\', "/"));
+
+        let output = aft_bin()
+            .args(["sync", &src_url, &dst_url, "--dry-run", "--format", "json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    }
+}

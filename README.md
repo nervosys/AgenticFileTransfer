@@ -33,6 +33,16 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
   after network interruptions without restarting from scratch
 - **Retry with backoff** — Exponential backoff retry logic for reliability
 - **Checksum verification** — SHA-256, SHA-512, and MD5 integrity verification
+- **Directory synchronization** — `aft sync` with rsync/rclone-class sync engine:
+  configurable compare modes (size, modtime, checksum), `--dry-run`, `--delete`
+  extraneous, include/exclude glob filters, size filters, and depth limiting
+- **Move / rename** — `aft mv` to move or rename files across protocols
+- **Delete** — `aft rm` to remove files and directories (with `--recursive`)
+- **Create directories** — `aft mkdir` to create directories on any protocol
+- **Preserve timestamps** — `--preserve` flag to copy modification times
+- **Extended protocol operations** — `delete`, `rename`, `mkdir`, `set_timestamps`,
+  `exists`, and `list_recursive` operations on all protocol handlers with default
+  implementations (full support on local filesystem)
 - **Recursive directory copy** — `aft copy -r` for directory trees across protocols
 - **Bandwidth throttling** — `--rate-limit` to cap transfer speed in bytes/sec
 - **Configuration file** — Persistent settings via `~/.aft/config.toml`
@@ -208,6 +218,45 @@ aft copy ./src/ ./backup/src/
 aft copy -r ./project/ sftp://server/backups/project/
 ```
 
+### Synchronize directories
+
+```bash
+# Sync local to remote (rsync-style — only transfer changed files)
+aft sync ./project/ sftp://server/backup/project/
+
+# Dry run — preview what would change
+aft sync ./src/ ./dst/ --dry-run
+
+# Delete extraneous files in destination
+aft sync ./src/ ./dst/ --delete
+
+# Include/exclude filters
+aft sync ./src/ ./dst/ --include "*.rs" --exclude "target/*"
+
+# Compare by checksum instead of size
+aft sync ./src/ ./dst/ --compare checksum
+```
+
+### Move / rename
+
+```bash
+aft mv ./old-name.txt ./new-name.txt
+aft mv ./file.pdf sftp://server/archive/file.pdf
+```
+
+### Delete files and directories
+
+```bash
+aft rm ./temp-file.txt
+aft rm ./build-output/ --recursive
+```
+
+### Create directories
+
+```bash
+aft mkdir ./new-dir/sub-dir/
+aft mkdir sftp://server/uploads/batch-001/
+```
 ### Inspect a remote resource
 
 ```bash
@@ -219,6 +268,9 @@ aft head https://example.com/file.tar.gz
 ```bash
 aft ls ./my-directory/
 aft ls aftp://server:2600/
+
+# Recursive listing with long format
+aft ls -r -l ./project/
 ```
 
 ### Compute a checksum
@@ -466,7 +518,7 @@ MITRE ATT&CK mitigations, NIST FIPS 140-3 compliance, and CMMC 2.0 Level 2 asses
 ```shell
 src/
 ├── main.rs                 # Entry point, command dispatch, UTF-8 console init
-├── cli.rs                  # CLI parser (clap derive, 12 subcommands)
+├── cli.rs                  # CLI parser (clap derive, 16 subcommands)
 ├── error.rs                # Error types (AftError enum, thiserror)
 ├── engine.rs               # Transfer engine (parallel chunks, retry, checksums)
 ├── output.rs               # Structured + colorized output formatting
@@ -475,6 +527,7 @@ src/
 ├── history.rs              # Transfer history logging (~/.aft/history.jsonl, JSON Lines)
 ├── audit.rs                # Security audit logging (~/.aft/audit.log, JSON Lines)
 ├── plugins.rs              # Plugin system for custom protocol handlers
+├── sync.rs                 # rsync/rclone-class directory sync engine
 ├── lib.rs                  # Library re-exports for testing
 ├── aftp/
 │   ├── mod.rs              # Module declarations
@@ -502,7 +555,7 @@ src/
     ├── smb.rs              # SMB/CIFS (UNC + smbclient)
     └── dod.rs              # DoD CDS protocol (classification-aware HTTPS)
 tests/
-└── integration_tests.rs    # 271 tests (engine, AFTP server, crypto, CLI, mux, classification, telemetry, session resume, hardening)
+└── integration_tests.rs    # 314 tests (engine, AFTP server, crypto, CLI, mux, classification, telemetry, session resume, hardening, sync, extended ops)
 .github/
 └── workflows/ci.yml        # CI pipeline (test, clippy, fmt, cargo-audit)
 ```
@@ -524,6 +577,14 @@ pub trait ProtocolHandler: Send + Sync {
     async fn download_range(&self, url: &str, start: u64, end: u64, opts: &ProtocolOptions) -> AftResult<Vec<u8>>;
     async fn upload(&self, source: &Path, url: &str, opts: &ProtocolOptions, ...) -> AftResult<u64>;
     async fn list(&self, url: &str, opts: &ProtocolOptions) -> AftResult<Vec<DirectoryEntry>>;
+
+    // Extended operations (with default implementations)
+    fn supports_extended_ops(&self) -> bool;
+    async fn delete(&self, url: &str, recursive: bool, opts: &ProtocolOptions) -> AftResult<()>;
+    async fn rename(&self, from: &str, to: &str, opts: &ProtocolOptions) -> AftResult<()>;
+    async fn mkdir(&self, url: &str, opts: &ProtocolOptions) -> AftResult<()>;
+    async fn exists(&self, url: &str, opts: &ProtocolOptions) -> AftResult<bool>;
+    async fn list_recursive(&self, url: &str, opts: &ProtocolOptions, max_depth: usize) -> AftResult<Vec<DirectoryEntry>>;
 }
 ```
 

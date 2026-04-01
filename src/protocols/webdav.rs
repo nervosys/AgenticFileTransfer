@@ -414,6 +414,9 @@ fn parse_propfind_response(xml: &str, base_url: &str) -> Vec<DirectoryEntry> {
             size,
             is_directory,
             last_modified,
+            relative_path: None,
+            is_symlink: None,
+            permissions: None,
         });
     }
 

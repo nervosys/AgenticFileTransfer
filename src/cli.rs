@@ -17,6 +17,16 @@ pub enum ChecksumAlgorithm {
     Md5,
 }
 
+#[derive(Debug, Clone, ValueEnum)]
+pub enum CliCompareMode {
+    /// Compare files by size only (fast)
+    Size,
+    /// Compare files by modification time and size (default)
+    Modtime,
+    /// Compare files by SHA-256 checksum (slow, most accurate)
+    Checksum,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "aft",
@@ -224,6 +234,22 @@ pub enum Command {
         /// Recurse into directories
         #[arg(long, short = 'r')]
         recursive: bool,
+
+        /// Include only files matching these glob patterns (repeatable)
+        #[arg(long)]
+        include: Vec<String>,
+
+        /// Exclude files matching these glob patterns (repeatable)
+        #[arg(long)]
+        exclude: Vec<String>,
+
+        /// Preserve modification timestamps
+        #[arg(long)]
+        preserve: bool,
+
+        /// Show what would be done without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Inspect remote resource metadata without downloading
@@ -245,6 +271,14 @@ pub enum Command {
     List {
         /// Directory URL or path to list
         url: String,
+
+        /// List recursively
+        #[arg(long, short = 'r')]
+        recursive: bool,
+
+        /// Long format (show size, modification time, permissions)
+        #[arg(long, short = 'l')]
+        long: bool,
     },
 
     /// Output the agentic ontology schema describing all capabilities
@@ -307,6 +341,88 @@ pub enum Command {
         /// Transport layer: tcp, ws (WebSocket), or quic
         #[arg(long, default_value = "tcp")]
         transport: String,
+    },
+
+    /// Synchronize directories (rsync/rclone-style one-way sync)
+    #[command(name = "sync")]
+    Sync {
+        /// Source directory URL or path
+        source: String,
+
+        /// Destination directory URL or path
+        destination: String,
+
+        /// Comparison mode: size, modtime, or checksum
+        #[arg(long, default_value = "modtime")]
+        compare: CliCompareMode,
+
+        /// Show what would be done without making changes
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Delete files at destination that do not exist at source
+        #[arg(long)]
+        delete: bool,
+
+        /// Only copy if source is newer than destination
+        #[arg(long)]
+        update: bool,
+
+        /// Preserve modification timestamps
+        #[arg(long)]
+        preserve: bool,
+
+        /// Include only files matching these glob patterns (repeatable)
+        #[arg(long)]
+        include: Vec<String>,
+
+        /// Exclude files matching these glob patterns (repeatable)
+        #[arg(long)]
+        exclude: Vec<String>,
+
+        /// Minimum file size in bytes
+        #[arg(long)]
+        min_size: Option<u64>,
+
+        /// Maximum file size in bytes
+        #[arg(long)]
+        max_size: Option<u64>,
+
+        /// Maximum directory depth (0 = unlimited)
+        #[arg(long, default_value = "0")]
+        max_depth: usize,
+    },
+
+    /// Move (rename) a file or directory
+    #[command(name = "mv")]
+    Move {
+        /// Source path or URL
+        source: String,
+
+        /// Destination path or URL
+        destination: String,
+    },
+
+    /// Remove a file or directory
+    #[command(name = "rm")]
+    Remove {
+        /// URL or path to remove
+        url: String,
+
+        /// Remove directories recursively
+        #[arg(long, short = 'r')]
+        recursive: bool,
+
+        /// Force removal without confirmation
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Create a directory (including parent directories)
+    #[command(name = "mkdir")]
+    Mkdir {
+        /// URL or path of directory to create
+        url: String,
     },
 
     /// Manage protocol handler plugins

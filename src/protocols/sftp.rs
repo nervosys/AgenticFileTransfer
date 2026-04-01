@@ -261,6 +261,9 @@ impl ProtocolHandler for SftpHandler {
                     size: meta.size,
                     is_directory: meta.is_dir(),
                     last_modified: meta.mtime.map(|t| t.to_string()),
+                    relative_path: None,
+                    is_symlink: None,
+                    permissions: None,
                 }
             })
             .collect();
