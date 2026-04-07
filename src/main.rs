@@ -534,30 +534,37 @@ async fn cmd_get(
         ..Default::default()
     };
 
-    // Probe for progress bar sizing
-    let metadata = handler.head(url, &opts).await.ok();
-    let total_size = metadata.as_ref().and_then(|m| m.content_length);
-    let pb = output::create_progress_bar(total_size, format);
-
-    let progress_cb: Option<ProgressCb> = pb.as_ref().map(|pb| {
-        let pb = pb.clone();
-        Arc::new(move |bytes: u64, _total: Option<u64>| {
-            pb.set_position(bytes);
-        }) as ProgressCb
-    });
-
+    // For turbo, skip the extra HEAD — turbo_download_auto already probes.
+    // For standard, probe for progress bar sizing.
     let result = if cli.turbo {
         let tc = build_turbo_config(cli);
-        turbo::turbo_download_auto(&*handler, url, &dest, &opts, &tc, progress_cb)
+        let pb = output::create_progress_bar(None, format);
+        let progress_cb: Option<ProgressCb> = pb.as_ref().map(|pb| {
+            let pb = pb.clone();
+            Arc::new(move |bytes: u64, total: Option<u64>| {
+                if let Some(t) = total { pb.set_length(t); }
+                pb.set_position(bytes);
+            }) as ProgressCb
+        });
+        let r = turbo::turbo_download_auto(&*handler, url, &dest, &opts, &tc, progress_cb)
             .await
-            .map(|(tr, _profile)| tr)
+            .map(|(tr, _profile)| tr);
+        if let Some(ref pb) = pb { pb.finish_and_clear(); }
+        r
     } else {
-        engine::download(&*handler, url, &dest, &opts, &config, progress_cb).await
+        let metadata = handler.head(url, &opts).await.ok();
+        let total_size = metadata.as_ref().and_then(|m| m.content_length);
+        let pb = output::create_progress_bar(total_size, format);
+        let progress_cb: Option<ProgressCb> = pb.as_ref().map(|pb| {
+            let pb = pb.clone();
+            Arc::new(move |bytes: u64, _total: Option<u64>| {
+                pb.set_position(bytes);
+            }) as ProgressCb
+        });
+        let r = engine::download(&*handler, url, &dest, &opts, &config, progress_cb).await;
+        if let Some(ref pb) = pb { pb.finish_and_clear(); }
+        r
     };
-
-    if let Some(ref pb) = pb {
-        pb.finish_and_clear();
-    }
 
     match result {
         Ok(transfer) => {

@@ -2,7 +2,20 @@
 **/*.rs.bk
 *.pdb
 .env
+.env.*
 /test_data/
 /download
 test_download.txt
 test_readme.txt
+
+# Secrets / keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.aftnn
+*.afte
+
+# OS
+.DS_Store
+Thumbs.db

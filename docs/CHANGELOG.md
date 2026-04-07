@@ -5,6 +5,17 @@ All notable changes to AFT will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-04-02
+
+### Changed
+
+- **Transfer engine optimizations** — Improved throughput in `engine.rs`, `turbo.rs`,
+  `protocols/http.rs`, and `protocols/local.rs` for maximum transfer performance.
+
+### Fixed
+
+- **Test count** — Updated documentation to reflect 322 tests (up from 314).
+
 ## [1.3.0] - 2026-03-25
 
 ### Added
