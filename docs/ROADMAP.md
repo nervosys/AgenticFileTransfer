@@ -305,7 +305,7 @@ src/
     ├── smb.rs             # SMB/CIFS (UNC + smbclient)
     └── dod.rs             # DoD CDS protocol (classification-aware HTTPS)
 tests/
-└── integration_tests.rs   # Integration & unit tests (177 tests: protocols, security, crypto, hardening, telemetry)
+└── integration_tests.rs   # Integration & unit tests (322 tests: protocols, security, crypto, hardening, telemetry)
 .github/
 └── workflows/ci.yml       # CI pipeline (test, clippy, fmt, cargo-audit)
 ```

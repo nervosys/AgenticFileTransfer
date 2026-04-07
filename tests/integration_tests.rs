@@ -4061,7 +4061,10 @@ mod local_extended_ops_tests {
         fs::create_dir_all(&sub).unwrap();
         fs::write(sub.join("file.txt"), "x").unwrap();
         let target = dir.path().join("parent");
-        handler.delete(&file_url(&target), true, &opts()).await.unwrap();
+        handler
+            .delete(&file_url(&target), true, &opts())
+            .await
+            .unwrap();
         assert!(!target.exists());
     }
 
@@ -4072,7 +4075,10 @@ mod local_extended_ops_tests {
         let src = dir.path().join("old.txt");
         let dst = dir.path().join("new.txt");
         fs::write(&src, "renamed").unwrap();
-        handler.rename(&file_url(&src), &file_url(&dst), &opts()).await.unwrap();
+        handler
+            .rename(&file_url(&src), &file_url(&dst), &opts())
+            .await
+            .unwrap();
         assert!(!src.exists());
         assert_eq!(fs::read_to_string(&dst).unwrap(), "renamed");
     }
@@ -4084,7 +4090,10 @@ mod local_extended_ops_tests {
         let src = dir.path().join("move.txt");
         let dst = dir.path().join("deep").join("dir").join("moved.txt");
         fs::write(&src, "moved").unwrap();
-        handler.rename(&file_url(&src), &file_url(&dst), &opts()).await.unwrap();
+        handler
+            .rename(&file_url(&src), &file_url(&dst), &opts())
+            .await
+            .unwrap();
         assert!(!src.exists());
         assert_eq!(fs::read_to_string(&dst).unwrap(), "moved");
     }
@@ -4098,7 +4107,10 @@ mod local_extended_ops_tests {
         let mtime = chrono::DateTime::parse_from_rfc3339("2020-06-15T12:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        handler.set_timestamps(&file_url(&f), mtime, &opts()).await.unwrap();
+        handler
+            .set_timestamps(&file_url(&f), mtime, &opts())
+            .await
+            .unwrap();
         let meta = fs::metadata(&f).unwrap();
         let actual = meta.modified().unwrap();
         let expected = std::time::SystemTime::from(mtime);
@@ -4136,7 +4148,7 @@ mod local_extended_ops_tests {
 mod sync_engine_tests {
     use aft::protocols::local::LocalHandler;
     use aft::protocols::ProtocolOptions;
-    use aft::sync::{CompareMode, SyncConfig, SyncActionKind};
+    use aft::sync::{CompareMode, SyncActionKind, SyncConfig};
     use std::fs;
 
     fn opts() -> ProtocolOptions {
@@ -4163,13 +4175,22 @@ mod sync_engine_tests {
         };
 
         let result = aft::sync::sync(
-            &handler, &file_url(&src),
-            &handler, &file_url(&dst),
-            &opts(), &config, None,
-        ).await.unwrap();
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.files_copied, 1);
-        assert_eq!(fs::read_to_string(dst.join("hello.txt")).unwrap(), "hello world");
+        assert_eq!(
+            fs::read_to_string(dst.join("hello.txt")).unwrap(),
+            "hello world"
+        );
     }
 
     #[tokio::test]
@@ -4189,10 +4210,16 @@ mod sync_engine_tests {
         };
 
         let result = aft::sync::sync(
-            &handler, &file_url(&src),
-            &handler, &file_url(&dst),
-            &opts(), &config, None,
-        ).await.unwrap();
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Size-mode: same length → skip
         assert_eq!(result.files_skipped, 1);
@@ -4216,10 +4243,16 @@ mod sync_engine_tests {
         };
 
         let result = aft::sync::sync(
-            &handler, &file_url(&src),
-            &handler, &file_url(&dst),
-            &opts(), &config, None,
-        ).await.unwrap();
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(result.dirs_created > 0);
         assert_eq!(result.files_copied, 1);
@@ -4246,10 +4279,16 @@ mod sync_engine_tests {
         };
 
         let result = aft::sync::sync(
-            &handler, &file_url(&src),
-            &handler, &file_url(&dst),
-            &opts(), &config, None,
-        ).await.unwrap();
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.files_copied, 1); // Counted but not executed
         assert!(!dst.join("nodry.txt").exists()); // File NOT created
@@ -4274,10 +4313,16 @@ mod sync_engine_tests {
         };
 
         let result = aft::sync::sync(
-            &handler, &file_url(&src),
-            &handler, &file_url(&dst),
-            &opts(), &config, None,
-        ).await.unwrap();
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.files_deleted, 1);
         assert!(!dst.join("extra.txt").exists());
@@ -4302,10 +4347,16 @@ mod sync_engine_tests {
         };
 
         let result = aft::sync::sync(
-            &handler, &file_url(&src),
-            &handler, &file_url(&dst),
-            &opts(), &config, None,
-        ).await.unwrap();
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.files_copied, 1);
         assert!(dst.join("yes.txt").exists());
@@ -4330,10 +4381,16 @@ mod sync_engine_tests {
         };
 
         let result = aft::sync::sync(
-            &handler, &file_url(&src),
-            &handler, &file_url(&dst),
-            &opts(), &config, None,
-        ).await.unwrap();
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.files_copied, 1);
         assert!(dst.join("keep.txt").exists());
@@ -4357,13 +4414,21 @@ mod sync_engine_tests {
         };
 
         let result = aft::sync::sync(
-            &handler, &file_url(&src),
-            &handler, &file_url(&dst),
-            &opts(), &config, None,
-        ).await.unwrap();
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.files_copied, 2);
-        let copy_actions: Vec<_> = result.actions.iter()
+        let copy_actions: Vec<_> = result
+            .actions
+            .iter()
             .filter(|a| a.kind == SyncActionKind::Copy)
             .collect();
         assert_eq!(copy_actions.len(), 2);
@@ -4376,7 +4441,7 @@ mod sync_engine_tests {
         let dst = dir.path().join("dst");
         fs::create_dir_all(&src).unwrap();
         fs::create_dir_all(&dst).unwrap();
-        fs::write(src.join("small.txt"), "x").unwrap();           // 1 byte
+        fs::write(src.join("small.txt"), "x").unwrap(); // 1 byte
         fs::write(src.join("big.txt"), "x".repeat(1000)).unwrap(); // 1000 bytes
 
         let handler = LocalHandler;
@@ -4387,10 +4452,16 @@ mod sync_engine_tests {
         };
 
         let result = aft::sync::sync(
-            &handler, &file_url(&src),
-            &handler, &file_url(&dst),
-            &opts(), &config, None,
-        ).await.unwrap();
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.files_copied, 1);
         assert!(dst.join("big.txt").exists());
@@ -4455,6 +4526,10 @@ mod cli_new_subcommands_tests {
             .args(["sync", &src_url, &dst_url, "--dry-run", "--format", "json"])
             .output()
             .unwrap();
-        assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

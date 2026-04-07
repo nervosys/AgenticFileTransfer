@@ -331,6 +331,8 @@ async fn chunked_download(
     let semaphore = Arc::new(tokio::sync::Semaphore::new(num_parallel));
     let mut handles = Vec::with_capacity(num_chunks);
 
+    // Share one handler across all chunks (reuses HTTP connection pool)
+    let shared_handler: Arc<dyn ProtocolHandler> = Arc::from(crate::protocols::resolve_protocol(url)?);
     for (start, end) in chunks {
         let permit = semaphore
             .clone()
@@ -344,10 +346,9 @@ async fn chunked_download(
         let progress_cb = progress_cb.clone();
         let url = url.to_string();
         let t_start = transfer_start;
+        let handler = shared_handler.clone();
 
         let handle = tokio::spawn(async move {
-            // Create a fresh handler for this task
-            let handler = crate::protocols::resolve_protocol(&url)?;
             let data = handler.download_range(&url, start, end, &opts).await?;
 
             // Write chunk to correct file offset

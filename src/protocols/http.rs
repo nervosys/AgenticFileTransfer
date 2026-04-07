@@ -36,7 +36,14 @@ impl HttpHandler {
     fn build_client(&self, opts: &ProtocolOptions) -> AftResult<Client> {
         let mut builder = Client::builder()
             .danger_accept_invalid_certs(opts.insecure)
-            .redirect(reqwest::redirect::Policy::limited(opts.max_redirects));
+            .redirect(reqwest::redirect::Policy::limited(opts.max_redirects))
+            // Performance: disable Nagle, keep connections alive, large pool
+            .tcp_nodelay(true)
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .pool_max_idle_per_host(32)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .http1_only()
+            .no_gzip().no_brotli().no_deflate(); // skip decompression middleware
 
         if opts.connect_timeout_secs > 0 {
             builder =
@@ -192,12 +199,17 @@ impl ProtocolHandler for HttpHandler {
                 .open(dest)
                 .await?
         } else {
-            tokio::fs::File::create(dest).await?
+            let f = tokio::fs::File::create(dest).await?;
+            // Pre-allocate file to avoid fragmentation overhead
+            if let Some(size) = total_size {
+                let _ = f.set_len(size).await;
+            }
+            f
         };
 
         let mut downloaded = bytes_already;
         let mut stream = resp.bytes_stream();
-        let mut file = tokio::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
+        let mut file = tokio::io::BufWriter::with_capacity(8 * 1024 * 1024, file);
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| AftError::TransferFailed(e.to_string()))?;

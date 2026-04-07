@@ -95,8 +95,6 @@ no sockets are opened.
 
 AFT is deployable on air-gapped and disconnected networks with no modification:
 
-- **Zero phone-home** — Disable telemetry with `aft telemetry opt-out`; no
-  license checks, update pings, or analytics at runtime
 - **No external dependencies** — Single static binary; no dynamic library loading
   required (plugins are opt-in from `~/.aft/plugins/`)
 - **Offline crypto** — PQC keygen, encrypt, and decrypt use only local entropy
@@ -469,7 +467,7 @@ Plugins are automatically loaded from `~/.aft/plugins/` at startup.
 ## Security
 
 AFT includes security features designed for DoD and enterprise environments.
-See [SECURITY.md](SECURITY.md) for the full audit report covering CVE patterns,
+See [SECURITY.md](docs/SECURITY.md) for the full audit report covering CVE patterns,
 MITRE ATT&CK mitigations, NIST FIPS 140-3 compliance, and CMMC 2.0 Level 2 assessment.
 
 ### Key Security Features
@@ -502,26 +500,26 @@ MITRE ATT&CK mitigations, NIST FIPS 140-3 compliance, and CMMC 2.0 Level 2 asses
 
 ## Global Options
 
-| Flag                | Short | Default | Description                                |
-| ------------------- | ----- | ------- | ------------------------------------------ |
-| `--format`          | `-f`  | `text`  | Output format: `text`, `json`, `quiet`     |
-| `--agent`           |       | `false` | Agent mode (JSON, no interactive elements) |
-| `--parallel`        |       | `4`     | Parallel connections for chunked transfers |
-| `--retries`         |       | `3`     | Max retry attempts                         |
-| `--retry-delay-ms`  |       | `1000`  | Initial retry delay (exponential backoff)  |
-| `--connect-timeout` |       | `30`    | Connection timeout (seconds)               |
-| `--timeout`         |       | `0`     | Transfer timeout, 0 = unlimited (seconds)  |
-| `--insecure`        |       | `false` | Skip TLS certificate verification          |
-| `--rate-limit`      |       | `0`     | Max bandwidth in bytes/sec (0 = unlimited) |
-| `--turbo`          |       | `false` | Enable turbo mode (adaptive multi-stream)  |
-| `--streams`        |       | `0`     | Parallel streams in turbo (0 = auto)       |
-| `--chunk-size`     |       | `0`     | Chunk size in bytes for turbo (0 = adaptive)|
-| `--sock-buf`       |       | `0`     | Socket buffer size for turbo (0 = auto BDP)|
-| `--no-mmap`        |       | `false` | Disable memory-mapped I/O in turbo mode    |
-| `--pin-cert`        |       |         | Pin TLS cert by SHA-256 fingerprint (hex)  |
-| `--ca-bundle`       |       |         | Custom CA certificate bundle (PEM file)    |
-| `--verbose`         | `-v`  | `false` | Verbose output                             |
-| `--quiet`           | `-q`  | `false` | Suppress non-error output                  |
+| Flag                | Short | Default | Description                                  |
+| ------------------- | ----- | ------- | -------------------------------------------- |
+| `--format`          | `-f`  | `text`  | Output format: `text`, `json`, `quiet`       |
+| `--agent`           |       | `false` | Agent mode (JSON, no interactive elements)   |
+| `--parallel`        |       | `4`     | Parallel connections for chunked transfers   |
+| `--retries`         |       | `3`     | Max retry attempts                           |
+| `--retry-delay-ms`  |       | `1000`  | Initial retry delay (exponential backoff)    |
+| `--connect-timeout` |       | `30`    | Connection timeout (seconds)                 |
+| `--timeout`         |       | `0`     | Transfer timeout, 0 = unlimited (seconds)    |
+| `--insecure`        |       | `false` | Skip TLS certificate verification            |
+| `--rate-limit`      |       | `0`     | Max bandwidth in bytes/sec (0 = unlimited)   |
+| `--turbo`           |       | `false` | Enable turbo mode (adaptive multi-stream)    |
+| `--streams`         |       | `0`     | Parallel streams in turbo (0 = auto)         |
+| `--chunk-size`      |       | `0`     | Chunk size in bytes for turbo (0 = adaptive) |
+| `--sock-buf`        |       | `0`     | Socket buffer size for turbo (0 = auto BDP)  |
+| `--no-mmap`         |       | `false` | Disable memory-mapped I/O in turbo mode      |
+| `--pin-cert`        |       |         | Pin TLS cert by SHA-256 fingerprint (hex)    |
+| `--ca-bundle`       |       |         | Custom CA certificate bundle (PEM file)      |
+| `--verbose`         | `-v`  | `false` | Verbose output                               |
+| `--quiet`           | `-q`  | `false` | Suppress non-error output                    |
 
 ## Architecture
 
@@ -566,7 +564,7 @@ src/
     ├── smb.rs              # SMB/CIFS (UNC + smbclient)
     └── dod.rs              # DoD CDS protocol (classification-aware HTTPS)
 tests/
-└── integration_tests.rs    # 314 tests (engine, AFTP server, crypto, CLI, mux, classification, telemetry, session resume, hardening, sync, extended ops)
+└── integration_tests.rs    # 322 tests (engine, AFTP server, crypto, CLI, mux, classification, telemetry, session resume, hardening, sync, extended ops)
 .github/
 └── workflows/ci.yml        # CI pipeline (test, clippy, fmt, cargo-audit)
 ```

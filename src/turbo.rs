@@ -926,15 +926,23 @@ pub async fn turbo_download_auto(
     turbo_config: &TurboConfig,
     progress_cb: Option<ProgressCb>,
 ) -> AftResult<(TransferResult, LinkProfile)> {
-    // Quick probe: single HEAD request for size + RTT
-    let t0 = Instant::now();
-    let metadata = handler.head(url, opts).await.ok();
-    let head_rtt_us = t0.elapsed().as_micros() as u64;
-    let total_size = metadata.as_ref().and_then(|m| m.content_length);
-    let supports_ranges = metadata.as_ref().map(|m| m.accepts_ranges).unwrap_or(false);
+    // Detect localhost by URL — skip expensive HEAD probe for same-machine transfers
+    let url_is_local = url.contains("://localhost") || url.contains("://127.0.0.1") || url.contains("://[::1]");
 
-    // Build a lightweight profile from the single HEAD we already made
-    let is_local_link = head_rtt_us < 2_000; // < 2 ms = probably localhost
+    let (head_rtt_us, total_size, supports_ranges) = if url_is_local && turbo_config.streams == 0 {
+        // Skip HEAD entirely for localhost: single-stream is always fastest
+        (0, None, false)
+    } else {
+        // Quick probe: single HEAD request for size + RTT
+        let t0 = Instant::now();
+        let metadata = handler.head(url, opts).await.ok();
+        let head_rtt_us = t0.elapsed().as_micros() as u64;
+        let total_size = metadata.as_ref().and_then(|m| m.content_length);
+        let supports_ranges = metadata.as_ref().map(|m| m.accepts_ranges).unwrap_or(false);
+        (head_rtt_us, total_size, supports_ranges)
+    };
+
+    let is_local_link = url_is_local || head_rtt_us < 5_000;
     let streams = if turbo_config.streams > 0 {
         turbo_config.streams.min(MAX_STREAMS)
     } else if is_local_link {
@@ -965,7 +973,6 @@ pub async fn turbo_download_auto(
     };
 
     // Use the standard engine with turbo-recommended parallel/chunk settings.
-    // This avoids the per-chunk handler recreation overhead of turbo_download.
     let config = crate::engine::TransferConfig {
         parallel_chunks: if supports_ranges { streams } else { 1 },
         chunk_size: chunk,
