@@ -8,7 +8,7 @@
 //! - Timestamp preservation
 //! - Recursive directory traversal with depth limiting
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::engine::{self, ProgressCb, TransferConfig};
@@ -70,6 +70,12 @@ pub struct SyncConfig {
     pub max_size: Option<u64>,
     /// Maximum directory depth (0 = unlimited)
     pub max_depth: usize,
+    /// Number of files to transfer concurrently (0 or 1 = sequential).
+    ///
+    /// File-level concurrency is what keeps a high-latency link busy: a tree of
+    /// N small files otherwise costs N serialized round trips. This is distinct
+    /// from `transfer.parallel_chunks`, which splits a *single* large file.
+    pub transfers: usize,
     /// Transfer config for the underlying engine
     pub transfer: TransferConfig,
 }
@@ -87,10 +93,14 @@ impl Default for SyncConfig {
             min_size: None,
             max_size: None,
             max_depth: 0,
+            transfers: DEFAULT_TRANSFERS,
             transfer: TransferConfig::default(),
         }
     }
 }
+
+/// Default file-level concurrency for sync.
+pub const DEFAULT_TRANSFERS: usize = 8;
 
 /// Result of a sync operation
 #[derive(Debug, Clone, serde::Serialize)]
@@ -150,6 +160,7 @@ pub async fn sync(
 
     // Plan actions
     let mut actions = Vec::new();
+    let mut dir_delete_set: HashSet<String> = HashSet::new();
     let filter = Filter::new(&config.include, &config.exclude);
 
     for entry in &src_entries {
@@ -284,6 +295,10 @@ pub async fn sync(
         delete_dirs.sort_by_key(|b| std::cmp::Reverse(b.matches('/').count()));
         actions.extend(delete_files);
         for dir_rel in delete_dirs {
+            // Remember which Delete actions target directories — the executor
+            // must run those strictly sequentially (deepest first), while file
+            // deletes can run concurrently.
+            dir_delete_set.insert(dir_rel.clone());
             actions.push(SyncAction {
                 kind: SyncActionKind::Delete,
                 relative_path: dir_rel,
@@ -314,16 +329,65 @@ pub async fn sync(
             }
         }
     } else {
-        for action in &actions {
-            match action.kind {
-                SyncActionKind::Mkdir => {
-                    let dst_url = join_url(dst_base, &action.relative_path);
-                    dst_handler.mkdir(&dst_url, opts).await?;
-                    result.dirs_created += 1;
+        use futures::stream::StreamExt;
+
+        let concurrency = config.transfers.max(1);
+
+        // Source mtimes, indexed by relative path. `list_recursive` already
+        // fetched these, so `--preserve` costs no extra round trips.
+        let src_mtimes: HashMap<&str, &str> = src_entries
+            .iter()
+            .filter_map(|e| {
+                match (e.relative_path.as_deref(), e.last_modified.as_deref()) {
+                    (Some(rel), Some(mtime)) => Some((rel, mtime)),
+                    _ => None,
                 }
-                SyncActionKind::Copy => {
-                    let src_url = join_url(src_base, &action.relative_path);
-                    let dst_url = join_url(dst_base, &action.relative_path);
+            })
+            .collect();
+
+        result.files_skipped = actions
+            .iter()
+            .filter(|a| a.kind == SyncActionKind::Skip)
+            .count() as u64;
+
+        // ── 1. Directories, shallowest first ────────────────────────────────
+        //
+        // Sequential: a child mkdir must not race its parent. Directories are
+        // few relative to files, so this is not the bottleneck.
+        //
+        // Skipped entirely for protocols that build the path on write. AFTP is
+        // the motivating case: its server creates parent directories when
+        // handling a PUT, and its wire protocol has no MKDIR frame, so issuing
+        // one would fail the whole sync on the first subdirectory.
+        if !dst_handler.creates_parent_dirs_on_write() {
+            let mut mkdirs: Vec<&SyncAction> = actions
+                .iter()
+                .filter(|a| a.kind == SyncActionKind::Mkdir)
+                .collect();
+            mkdirs.sort_by_key(|a| a.relative_path.matches('/').count());
+            for action in mkdirs {
+                let dst_url = join_url(dst_base, &action.relative_path);
+                dst_handler.mkdir(&dst_url, opts).await?;
+                result.dirs_created += 1;
+            }
+        }
+
+        // ── 2. File copies, bounded concurrency ─────────────────────────────
+        //
+        // This is the win: N files no longer cost N serialized round trips.
+        let copies: Vec<&SyncAction> = actions
+            .iter()
+            .filter(|a| a.kind == SyncActionKind::Copy)
+            .collect();
+
+        let copy_results: Vec<AftResult<u64>> = futures::stream::iter(copies)
+            .map(|action| {
+                let rel = action.relative_path.as_str();
+                let src_url = join_url(src_base, rel);
+                let dst_url = join_url(dst_base, rel);
+                let src_mtime = src_mtimes.get(rel).copied();
+                let progress_cb = progress_cb.clone();
+                async move {
                     let bytes = transfer_file(
                         src_handler,
                         &src_url,
@@ -331,39 +395,67 @@ pub async fn sync(
                         &dst_url,
                         opts,
                         &config.transfer,
-                        progress_cb.clone(),
+                        progress_cb,
                     )
                     .await?;
-                    result.bytes_transferred += bytes;
-                    result.files_copied += 1;
 
-                    // Preserve timestamps if requested
                     if config.preserve_timestamps {
-                        if let Ok(src_meta) = src_handler.head(&src_url, opts).await {
-                            if let Some(mtime_str) = src_meta.last_modified {
-                                if let Ok(mtime) = chrono::DateTime::parse_from_rfc3339(&mtime_str)
-                                {
-                                    let _ = dst_handler
-                                        .set_timestamps(
-                                            &dst_url,
-                                            mtime.with_timezone(&chrono::Utc),
-                                            opts,
-                                        )
-                                        .await;
-                                }
-                            }
+                        if let Some(mtime) = src_mtime
+                            .and_then(|m| chrono::DateTime::parse_from_rfc3339(m).ok())
+                        {
+                            let _ = dst_handler
+                                .set_timestamps(&dst_url, mtime.with_timezone(&chrono::Utc), opts)
+                                .await;
                         }
                     }
+                    Ok(bytes)
                 }
-                SyncActionKind::Delete => {
-                    let dst_url = join_url(dst_base, &action.relative_path);
-                    dst_handler.delete(&dst_url, false, opts).await?;
-                    result.files_deleted += 1;
-                }
-                SyncActionKind::Skip => {
-                    result.files_skipped += 1;
-                }
-            }
+            })
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
+
+        // Surface the first failure, but only after in-flight work has settled
+        // so we never leave transfers running behind an early return.
+        for r in copy_results {
+            let bytes = r?;
+            result.bytes_transferred += bytes;
+            result.files_copied += 1;
+        }
+
+        // ── 3. File deletes, bounded concurrency ────────────────────────────
+        let file_deletes: Vec<&SyncAction> = actions
+            .iter()
+            .filter(|a| {
+                a.kind == SyncActionKind::Delete && !dir_delete_set.contains(&a.relative_path)
+            })
+            .collect();
+
+        let delete_results: Vec<AftResult<()>> = futures::stream::iter(file_deletes)
+            .map(|action| {
+                let dst_url = join_url(dst_base, &action.relative_path);
+                async move { dst_handler.delete(&dst_url, false, opts).await }
+            })
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
+
+        for r in delete_results {
+            r?;
+            result.files_deleted += 1;
+        }
+
+        // ── 4. Directory deletes, deepest first ─────────────────────────────
+        //
+        // Sequential and ordered: a parent cannot be removed before its
+        // children. `actions` already holds these deepest-first.
+        for action in actions
+            .iter()
+            .filter(|a| dir_delete_set.contains(&a.relative_path))
+        {
+            let dst_url = join_url(dst_base, &action.relative_path);
+            dst_handler.delete(&dst_url, false, opts).await?;
+            result.files_deleted += 1;
         }
     }
 

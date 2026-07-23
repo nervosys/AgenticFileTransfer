@@ -11,6 +11,11 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
   streaming SHA-256, TLS/mTLS, HMAC-SHA256 challenge/response auth, and TCP_NODELAY
 - **Built-in file server** — `aft serve` exposes any directory over AFTP with optional
   TLS, authentication, and compression
+- **Fountain-coded UDP data plane (`--fec`)** — RaptorQ symbols over UDP with a TCP
+  control plane, HMAC-authenticated symbols, BBR-style pacing, and stage-verify-commit
+  integrity. Survives lossy/high-RTT links where TCP collapses: on a measured
+  50 Mbit / 80 ms / 2%-loss link it moved 50 MB in ~13 s median (6/6 runs) while every
+  TCP-based tool tested timed out ([measured head-to-head](docs/BENCHMARKS.md#measured-head-to-head-lossy-and-latent-links))
 - **Quantum-resistant encryption** — NIST FIPS 203 ML-KEM (Kyber1024) key encapsulation
   with AES-256-GCM authenticated encryption for post-quantum file protection
 - **Neural network cipher** — Trainable MLP autoencoder encryption with OFB mode;
@@ -27,11 +32,12 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
   consistent schema across all operations
 - **Parallel chunked downloads** — Multi-connection downloads for large files
   with HTTP byte-range support
-- **Turbo transfer engine** — Adaptive high-performance transfers that outperform
-  Globus, Aspera, and HPN-SSH: dynamic mode selection (multi-stream, mmap, standard),
-  automatic link probing (RTT/bandwidth/BDP), up to 128 parallel streams per file,
-  16 MiB socket buffer auto-tuning, memory-mapped zero-copy I/O, and adaptive chunk
-  sizing (1 MiB → 64 MiB) — all via a single `--turbo` flag
+- **Turbo transfer engine** — Adaptive transfers via a single `--turbo` flag:
+  link probing (RTT / range support), parallel chunked downloads over byte ranges
+  (default 8 streams, `--parallel` up to 128), 16 MiB socket buffer auto-tuning on
+  every AFTP socket, and adaptive chunk sizing (1 MiB → 64 MiB). Local→local copies
+  use kernel-level copy (`CopyFileExW` / `copy_file_range`) with a memory-mapped
+  fallback. Uploads stream through the protocol handler; they are not memory-mapped.
 - **Resume support** — Resume interrupted transfers with `--resume`
 - **Intermittent connection resilience** — MOSH-inspired session persistence: the server
   tracks upload progress per session, and clients can reconnect and resume mid-transfer
@@ -39,8 +45,10 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
 - **Retry with backoff** — Exponential backoff retry logic for reliability
 - **Checksum verification** — SHA-256, SHA-512, and MD5 integrity verification
 - **Directory synchronization** — `aft sync` with rsync/rclone-class sync engine:
-  configurable compare modes (size, modtime, checksum), `--dry-run`, `--delete`
-  extraneous, include/exclude glob filters, size filters, and depth limiting
+  concurrent file transfers (`--transfers`, default 8) so a tree of N files does not
+  cost N serialized round trips, configurable compare modes (size, modtime, checksum),
+  `--dry-run`, `--delete` extraneous, include/exclude glob filters, size filters,
+  and depth limiting
 - **Move / rename** — `aft mv` to move or rename files across protocols
 - **Delete** — `aft rm` to remove files and directories (with `--recursive`)
 - **Create directories** — `aft mkdir` to create directories on any protocol
@@ -335,6 +343,35 @@ aft head aftp://server:2600/data.bin
 aft ls aftps://server:2600/
 ```
 
+### Fountain-coded transfers over lossy links (`--fec`)
+
+For high-latency or lossy paths (satellite, congested WAN, bad Wi-Fi), AFTP
+can carry file data as RaptorQ fountain-code symbols over a UDP data plane
+while keeping the TCP connection as a control plane:
+
+```bash
+# Server side — nothing extra; FEC support is advertised automatically
+aft serve ./files
+
+# Client side — opt in per transfer
+aft get aftp://server:2600/data.bin -o ./data.bin --fec
+aft put ./big.tar aftp://server:2600/big.tar --fec
+```
+
+Packet loss then costs repair bandwidth instead of TCP round-trip stalls: any
+sufficiently large subset of symbols reconstructs each 8 MiB block. Symbols
+are HMAC-authenticated, blocks are staged and SHA-256-verified before commit,
+and delivery is BBR-paced. The flag is negotiated — against a server without
+FEC support the client silently uses the reliable TCP path.
+
+Measured on a netem-shaped link (50 Mbit, 80 ms RTT, 2% loss, 50 MB file),
+`aft --fec` completed in ~13 s median (6/6 runs) while plain TCP transfers
+(aft, rsync, and every other TCP tool tested) exceeded a 300 s timeout — TCP
+throughput collapses to ≈ MSS/(RTT·√loss) ≈ 130 KB/s under those conditions.
+Trade-off: peak RSS is ~150 MB (bounded, independent of file size) versus
+~10 MB for the TCP path. Full methodology, numbers, and caveats:
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
 ### Server options
 
 | Flag                | Default   | Description                                |
@@ -511,6 +548,7 @@ MITRE ATT&CK mitigations, NIST FIPS 140-3 compliance, and CMMC 2.0 Level 2 asses
 | `--timeout`         |       | `0`     | Transfer timeout, 0 = unlimited (seconds)    |
 | `--insecure`        |       | `false` | Skip TLS certificate verification            |
 | `--rate-limit`      |       | `0`     | Max bandwidth in bytes/sec (0 = unlimited)   |
+| `--fec`             |       | `false` | Fountain-coded UDP data plane for AFTP       |
 | `--turbo`           |       | `false` | Enable turbo mode (adaptive multi-stream)    |
 | `--streams`         |       | `0`     | Parallel streams in turbo (0 = auto)         |
 | `--chunk-size`      |       | `0`     | Chunk size in bytes for turbo (0 = adaptive) |
@@ -536,7 +574,7 @@ src/
 ├── audit.rs                # Security audit logging (~/.aft/audit.log, JSON Lines)
 ├── plugins.rs              # Plugin system for custom protocol handlers
 ├── sync.rs                 # rsync/rclone-class directory sync engine
-├── turbo.rs                # Turbo transfer engine (multi-stream, mmap, adaptive)
+├── turbo.rs                # Turbo transfer engine (multi-stream, adaptive; mmap for local copies)
 ├── lib.rs                  # Library re-exports for testing
 ├── aftp/
 │   ├── mod.rs              # Module declarations
@@ -544,7 +582,13 @@ src/
 │   ├── server.rs           # AFTP file server (TLS + challenge auth + rate limiting)
 │   ├── client.rs           # AFTP client (TLS + hardened cipher suites)
 │   ├── mux.rs              # Multiplexed streams over AFTP
-│   └── transport.rs        # Transport abstraction (TCP, WebSocket, QUIC)
+│   ├── transport.rs        # Transport abstraction (TCP, WebSocket, QUIC)
+│   └── fec/                # Fountain-coded UDP data plane (--fec)
+│       ├── codec.rs        # RaptorQ block encode/decode (systematic symbols)
+│       ├── envelope.rs     # HMAC-authenticated symbol envelope
+│       ├── udp.rs          # UDP data plane (8 MiB socket buffers)
+│       ├── pacing.rs       # BBR-style pacer (BtlBw/RTprop filters)
+│       └── transfer.rs     # Block scheduler, feedback loop, adaptive patience
 ├── crypto/
 │   ├── mod.rs              # Encryption pipeline (PQC, Neural, Hybrid), AFTE file format
 │   ├── pqc.rs              # Post-quantum crypto (ML-KEM Kyber1024 + AES-256-GCM)

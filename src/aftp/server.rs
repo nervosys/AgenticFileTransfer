@@ -222,6 +222,7 @@ pub struct AftpServer {
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
     max_connections: usize,
+    fec: bool,
 }
 
 impl AftpServer {
@@ -250,7 +251,18 @@ impl AftpServer {
             tls_cert_path,
             tls_key_path,
             max_connections,
+            // Serve the data plane when asked. This costs nothing until a
+            // client actually negotiates `CAP_FEC`, and the UDP socket is
+            // bound per transfer rather than held open by the listener.
+            fec: true,
         }
+    }
+
+    /// Refuse the fountain-coded data plane even when a client offers it.
+    #[allow(dead_code)]
+    pub fn with_fec(mut self, enable: bool) -> Self {
+        self.fec = enable;
+        self
     }
 
     pub async fn run(self) -> AftResult<()> {
@@ -350,6 +362,7 @@ impl AftpServer {
             compression: self.compression,
             max_frame_size: self.max_frame_size,
             verbose: self.verbose,
+            fec: self.fec,
             rate_limiter: Mutex::new(AuthRateLimiter::new()),
             sessions: Mutex::new(SessionStore::new()),
         });
@@ -437,6 +450,9 @@ struct ServerState {
     compression: bool,
     max_frame_size: u32,
     verbose: bool,
+    /// Serve transfers over the fountain-coded UDP data plane when the client
+    /// asks for it.
+    fec: bool,
     rate_limiter: Mutex<AuthRateLimiter>,
     sessions: Mutex<SessionStore>,
 }
@@ -465,25 +481,43 @@ impl ServerState {
             }
             Ok(canonical)
         } else {
-            // For PUT: ensure parent is inside root
-            if let Some(parent) = path.parent() {
-                if parent.exists() {
-                    let cp = parent.canonicalize()?;
-                    if !cp.starts_with(&self.root) {
-                        return Err(AftError::PermissionDenied(
-                            "Path outside server root".into(),
-                        ));
-                    }
-                    Ok(path)
-                } else {
-                    Err(AftError::FileNotFound(format!(
-                        "Parent directory not found: {}",
-                        clean
-                    )))
+            // The target does not exist yet — a PUT creating a new file,
+            // possibly several directory levels deep. Requiring the immediate
+            // parent to exist would reject any nested upload into a fresh
+            // tree, which made directory sync over AFTP impossible even though
+            // the PUT handler creates parent directories itself.
+            //
+            // Validate against the nearest ancestor that *does* exist:
+            // canonicalizing it resolves symlinks on the existing portion, and
+            // `..` was rejected outright above, so the components below it are
+            // plain names that cannot escape.
+            let mut ancestor = path.clone();
+            let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+
+            while !ancestor.exists() {
+                let name = ancestor
+                    .file_name()
+                    .ok_or_else(|| AftError::Other("Invalid path".into()))?
+                    .to_os_string();
+                trailing.push(name);
+                match ancestor.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => ancestor = p.to_path_buf(),
+                    _ => return Err(AftError::Other("Invalid path".into())),
                 }
-            } else {
-                Err(AftError::Other("Invalid path".into()))
             }
+
+            let canonical = ancestor.canonicalize()?;
+            if !canonical.starts_with(&self.root) {
+                return Err(AftError::PermissionDenied(
+                    "Path outside server root".into(),
+                ));
+            }
+
+            let mut resolved = canonical;
+            for name in trailing.iter().rev() {
+                resolved.push(name);
+            }
+            Ok(resolved)
         }
     }
 }
@@ -500,7 +534,7 @@ async fn handle_hello_handshake<R, W>(
     writer: &mut BufWriter<W>,
     hello_frame: &Frame,
     addr: SocketAddr,
-) -> AftResult<(bool, bool, u32, String)>
+) -> AftResult<(bool, bool, u32, String, bool)>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
@@ -609,9 +643,16 @@ where
     agreed_caps |= CAP_SESSION_RESUME;
     // Always advertise hardware-accelerated CRC32 capability
     agreed_caps |= CAP_CRC32_FRAMES;
+    // The fountain data plane is only agreed when the client asked for it
+    // *and* this server is configured to serve it. `agreed_caps` starts as the
+    // client's bits, so clearing here yields the intersection.
+    if !state.fec {
+        agreed_caps &= !CAP_FEC;
+    }
 
     let use_compression = agreed_caps & CAP_COMPRESSION != 0;
     let use_crc32 = agreed_caps & CAP_CRC32_FRAMES != 0;
+    let use_fec = agreed_caps & CAP_FEC != 0;
 
     // Create a resumable session
     let session_id = {
@@ -624,7 +665,7 @@ where
     writer.flush().await?;
 
     let max_payload = state.max_frame_size + 1024;
-    Ok((use_compression, use_crc32, max_payload, session_id))
+    Ok((use_compression, use_crc32, max_payload, session_id, use_fec))
 }
 
 /// Handle a RESUME handshake: look up the session, verify ownership, and send
@@ -718,11 +759,19 @@ where
     // ── Handshake (HELLO or RESUME) ─────────────────────────────────────
     let first_frame = read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?;
 
-    let (use_compression, use_crc32, max_payload, session_id) = match first_frame.frame_type {
+    let (use_compression, use_crc32, max_payload, session_id, use_fec) = match first_frame
+        .frame_type
+    {
         FRAME_HELLO => {
             handle_hello_handshake(&state, &mut reader, &mut writer, &first_frame, addr).await?
         }
-        FRAME_RESUME => handle_resume_handshake(&state, &mut writer, &first_frame, addr).await?,
+        // A resumed session continues on the reliable path: the data plane is
+        // negotiated per connection, and a resume carries no offer.
+        FRAME_RESUME => {
+            let (c, r, m, s) =
+                handle_resume_handshake(&state, &mut writer, &first_frame, addr).await?;
+            (c, r, m, s, false)
+        }
         _ => {
             send_error(&mut writer, ERR_INVALID_REQUEST, "Expected HELLO or RESUME").await?;
             return Err(AftError::Other(
@@ -763,6 +812,8 @@ where
                     use_compression,
                     use_crc32,
                     addr,
+                    use_fec,
+                    &session_id,
                 )
                 .await?;
             }
@@ -779,6 +830,7 @@ where
                     use_crc32,
                     addr,
                     &session_id,
+                    use_fec,
                 )
                 .await?;
             }
@@ -803,8 +855,393 @@ where
     Ok(())
 }
 
+// ── FEC PUT handler ─────────────────────────────────────────────────────────
+
+/// Receive a pushed file over the fountain-coded UDP data plane.
+///
+/// Blocks are written to the staging file at their offsets as they decode, so
+/// receiver memory is bounded by the decoder working set rather than by the
+/// size of the upload. The staged file is only renamed into place once the
+/// client's SHA-256 matches — a failed or forged transfer leaves nothing
+/// behind.
+#[allow(clippy::too_many_arguments)]
+async fn recv_put_fec<R, W>(
+    reader: &mut BufReader<R>,
+    writer: &mut BufWriter<W>,
+    offer_frame: &Frame,
+    temp_path: &std::path::Path,
+    final_path: &std::path::Path,
+    addr: SocketAddr,
+    verbose: bool,
+    auth_token: Option<&str>,
+) -> AftResult<u64>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use super::fec::transfer::{recv_object_into, FecParams, Feedback, FileBlockWriter, DEFAULT_WINDOW};
+    use super::fec::udp::DataPlane;
+
+    let offer = parse_fec_offer(&offer_frame.payload)?;
+
+    // The client derives the symbol key from the same session id and shared
+    // token, so we reconstruct it here without it ever crossing the wire.
+    let key = super::fec::derive_symbol_key(auth_token, offer.session_id);
+    if offer.authenticated && key.is_none() {
+        // The client wants authenticated symbols but we cannot derive the key
+        // here; refuse rather than silently accepting unauthenticated data.
+        write_frame(
+            writer,
+            &Frame::new(
+                FRAME_FEC_ACCEPT,
+                build_fec_accept(false, 0, "symbol authentication unavailable"),
+            ),
+        )
+        .await?;
+        writer.flush().await?;
+        return Err(AftError::Other(
+            "FEC upload requested authenticated symbols but no key is available".into(),
+        ));
+    }
+
+    let plane = DataPlane::bind_for_session("0.0.0.0:0", key, offer.session_id).await?;
+    let port = plane.local_addr()?.port();
+
+    write_frame(
+        writer,
+        &Frame::new(FRAME_FEC_ACCEPT, build_fec_accept(true, port, "")),
+    )
+    .await?;
+    writer.flush().await?;
+
+    let params = FecParams {
+        session_id: offer.session_id,
+        total_len: offer.total_len,
+        block_size: offer.block_size as usize,
+        symbol_size: offer.symbol_size,
+        window: DEFAULT_WINDOW,
+        initial_loss_hint: 0.0,
+    };
+
+    // Stage to the temp path, pre-allocated so out-of-order blocks land
+    // correctly.
+    let mut sink = FileBlockWriter::create(temp_path, offer.total_len).await?;
+
+    // Feedback goes out on the control plane on its own task, so the receive
+    // loop never blocks on the socket and the socket is never written from two
+    // places at once.
+    let (fb_tx, mut fb_rx) = tokio::sync::mpsc::channel::<Feedback>(1024);
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Frame>(1024);
+    let pump = tokio::spawn(async move {
+        while let Some(msg) = fb_rx.recv().await {
+            let frame = match msg {
+                Feedback::NeedMore {
+                    block_id,
+                    symbols_needed,
+                    symbols_received,
+                } => Frame::new(
+                    FRAME_FEC_NEEDMORE,
+                    build_fec_needmore(block_id, symbols_needed, symbols_received),
+                ),
+                Feedback::BlockOk {
+                    block_id,
+                    symbols_used,
+                } => Frame::new(
+                    FRAME_FEC_BLOCK_OK,
+                    build_fec_block_ok(block_id, symbols_used),
+                ),
+            };
+            if frame_tx.send(frame).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Scoped so the receive future — and the borrows of `sink` and `fb_tx` it
+    // holds — are released before we finalize either of them.
+    let stats = {
+        // Initial guess only — the receiver measures the real RTT from its own
+        // NeedMore round-trips and adapts its patience as it learns.
+        let rtt = std::time::Duration::from_millis(50);
+        let recv_fut = recv_object_into(&plane, &mut sink, &fb_tx, &params, rtt);
+        tokio::pin!(recv_fut);
+
+        loop {
+            tokio::select! {
+                result = &mut recv_fut => break result?,
+                Some(frame) = frame_rx.recv() => {
+                    write_frame(writer, &frame).await?;
+                    writer.flush().await?;
+                }
+            }
+        }
+    };
+
+    drop(fb_tx);
+    // Awaiting the pump — rather than racing a `try_recv` against it — is what
+    // makes the last BlockOk reliably reach the sender. The receive future can
+    // win the `select!` the instant the final block decodes, before the pump
+    // has forwarded that block's BlockOk from `fb_rx` into `frame_rx`. Dropping
+    // `fb_tx` closes the pump's input, so it drains whatever is buffered and
+    // exits; only then is every feedback frame guaranteed to be in `frame_rx`
+    // for the flush below. Aborting here instead (or draining early) can lose
+    // that final BlockOk and leave the sender blocked forever on a transfer
+    // that actually completed.
+    let _ = pump.await;
+    while let Ok(frame) = frame_rx.try_recv() {
+        write_frame(writer, &frame).await?;
+    }
+    writer.flush().await?;
+
+    sink.finish().await?;
+
+    // The client closes with the authoritative digest.
+    let end_frame = read_frame(reader, INITIAL_MAX_PAYLOAD).await?;
+    if end_frame.frame_type != FRAME_DATA_END {
+        let _ = tokio::fs::remove_file(temp_path).await;
+        return Err(AftError::Other(format!(
+            "Expected DATA_END after FEC upload, got 0x{:02x}",
+            end_frame.frame_type
+        )));
+    }
+    let end = parse_data_end(&end_frame.payload)?;
+
+    if end.total_bytes != offer.total_len {
+        let _ = tokio::fs::remove_file(temp_path).await;
+        return Err(AftError::Other(format!(
+            "FEC upload byte count mismatch: offered {}, DATA_END says {}",
+            offer.total_len, end.total_bytes
+        )));
+    }
+
+    if end.checksum_algo == CHECKSUM_SHA256 && !end.checksum.is_empty() {
+        use tokio::io::AsyncReadExt;
+        let mut f = tokio::fs::File::open(temp_path).await?;
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = f.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let actual = hasher.finalize();
+        if actual.as_slice() != end.checksum.as_slice() {
+            // Fail closed: never publish data that did not verify.
+            let _ = tokio::fs::remove_file(temp_path).await;
+            return Err(AftError::ChecksumMismatch {
+                expected: hex::encode(&end.checksum),
+                actual: hex::encode(actual),
+            });
+        }
+    }
+
+    tokio::fs::rename(temp_path, final_path).await?;
+
+    write_frame(writer, &Frame::new(FRAME_PUT_ACK, build_put_ack(true))).await?;
+    writer.flush().await?;
+
+    if verbose {
+        eprintln!(
+            "  {} {} FEC received {} bytes ({} symbols, {} rejected)",
+            "*".green(),
+            addr,
+            offer.total_len,
+            stats.symbols_accepted,
+            stats.symbols_rejected
+        );
+    }
+
+    Ok(offer.total_len)
+}
+
+// ── FEC GET handler ─────────────────────────────────────────────────────────
+
+/// Serve a whole file over the fountain-coded UDP data plane.
+///
+/// Control plane carries the offer, the accept, and per-block feedback; the
+/// file bytes travel as UDP symbols. Blocks are read from disk one window at a
+/// time, so serving a 5 GB file costs the same memory as serving 50 MB.
+async fn serve_get_fec<R, W>(
+    state: &ServerState,
+    reader: &mut BufReader<R>,
+    writer: &mut BufWriter<W>,
+    path: &std::path::Path,
+    file_size: u64,
+    addr: SocketAddr,
+    session_id: &str,
+) -> AftResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use super::fec::transfer::{send_blocks, FecParams, Feedback, FileBlocks, DEFAULT_WINDOW};
+    use super::fec::udp::DataPlane;
+
+    // A stable numeric id for this transfer, derived from the session string.
+    let numeric_session = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        session_id.hash(&mut h);
+        h.finish()
+    };
+
+    let key = super::fec::derive_symbol_key(state.auth_token.as_deref(), numeric_session);
+    let authenticated = key.is_some();
+
+    let symbol_size = super::fec::max_symbol_size(super::fec::DEFAULT_MTU, authenticated);
+    let block_size = super::fec::DEFAULT_BLOCK_SIZE as u32;
+    let blocks = super::fec::block_count(file_size, block_size as usize);
+
+    write_frame(
+        writer,
+        &Frame::new(
+            FRAME_FEC_OFFER,
+            build_fec_offer(
+                numeric_session,
+                file_size,
+                block_size,
+                symbol_size,
+                blocks,
+                authenticated,
+            ),
+        ),
+    )
+    .await?;
+    writer.flush().await?;
+
+    // Wait for the client to bind its socket and tell us the port.
+    let accept_frame = read_frame(reader, INITIAL_MAX_PAYLOAD).await?;
+    if accept_frame.frame_type != FRAME_FEC_ACCEPT {
+        return Err(AftError::Other(format!(
+            "Expected FEC_ACCEPT, got 0x{:02x}",
+            accept_frame.frame_type
+        )));
+    }
+    let accept = parse_fec_accept(&accept_frame.payload)?;
+    if !accept.accepted {
+        return Err(AftError::Other(format!(
+            "Client declined the FEC data plane: {}",
+            accept.reason
+        )));
+    }
+
+    // Spray at the client's control-plane address on its chosen UDP port.
+    let plane = DataPlane::bind_for_session("0.0.0.0:0", key, numeric_session).await?;
+    plane
+        .connect(SocketAddr::new(addr.ip(), accept.udp_port))
+        .await?;
+
+    // Feedback arrives as control frames; forward it to the scheduler.
+    let (fb_tx, mut fb_rx) = tokio::sync::mpsc::channel::<Feedback>(1024);
+
+    let params = FecParams {
+        session_id: numeric_session,
+        total_len: file_size,
+        block_size: block_size as usize,
+        symbol_size,
+        window: DEFAULT_WINDOW,
+        initial_loss_hint: 0.0,
+    };
+
+    // Hash the file for the closing DATA_END while the transfer runs. Reading
+    // it a second time costs page-cache hits, not I/O, and keeps the sender's
+    // resident set bounded by the window rather than the file.
+    let digest = {
+        use tokio::io::AsyncReadExt;
+        let mut f = tokio::fs::File::open(path).await?;
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = f.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        hasher.finalize()
+    };
+
+    let blocks_reader = FileBlocks::new(path.to_path_buf(), 0);
+
+    // Feedback is assembled incrementally. `read_frame` is NOT
+    // cancellation-safe — it reads a 10-byte header and then the payload, so a
+    // `select!` that drops it mid-frame eats bytes and desynchronizes the
+    // control stream. `FrameAssembler` performs one cancellation-safe `read`
+    // per poll and keeps partial state across iterations.
+    let mut assembler = FrameAssembler::new();
+
+    let send_fut = send_blocks(&blocks_reader, &plane, &mut fb_rx, &params);
+    tokio::pin!(send_fut);
+
+    let stats = loop {
+        tokio::select! {
+            result = &mut send_fut => break result?,
+            frame = assembler.next_frame(reader, INITIAL_MAX_PAYLOAD) => {
+                let Some(frame) = frame? else { continue };
+                let msg = match frame.frame_type {
+                    FRAME_FEC_NEEDMORE => {
+                        let f = parse_fec_needmore(&frame.payload)?;
+                        Some(Feedback::NeedMore {
+                            block_id: f.block_id,
+                            symbols_needed: f.symbols_needed,
+                            symbols_received: f.symbols_received,
+                        })
+                    }
+                    FRAME_FEC_BLOCK_OK => {
+                        let f = parse_fec_block_ok(&frame.payload)?;
+                        Some(Feedback::BlockOk {
+                            block_id: f.block_id,
+                            symbols_used: f.symbols_used,
+                        })
+                    }
+                    // Anything else mid-transfer is a protocol violation.
+                    other => {
+                        return Err(AftError::Other(format!(
+                            "Unexpected frame 0x{:02x} during FEC transfer",
+                            other
+                        )))
+                    }
+                };
+                if let Some(msg) = msg {
+                    if fb_tx.send(msg).await.is_err() {
+                        // Scheduler finished; let the select pick up its result.
+                        continue;
+                    }
+                }
+            }
+        }
+    };
+
+    if state.verbose {
+        eprintln!(
+            "  {} {} FEC sent {} symbols ({} bytes) in {} repair rounds",
+            "→".green(),
+            addr,
+            stats.symbols_sent,
+            stats.bytes_sent,
+            stats.repair_rounds
+        );
+    }
+
+    // Close out on the control plane with the authoritative digest.
+    write_frame(
+        writer,
+        &Frame::new(
+            FRAME_DATA_END,
+            build_data_end(file_size, CHECKSUM_SHA256, &digest),
+        ),
+    )
+    .await?;
+    writer.flush().await?;
+
+    Ok(())
+}
+
 // ── GET handler ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_get<R, W>(
     state: &ServerState,
     _reader: &mut BufReader<R>,
@@ -813,6 +1250,8 @@ async fn handle_get<R, W>(
     use_compression: bool,
     use_crc32: bool,
     addr: SocketAddr,
+    use_fec: bool,
+    session_id: &str,
 ) -> AftResult<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -859,6 +1298,25 @@ where
     let head_payload = build_head_resp(file_size, modified_secs, &content_type);
     write_frame(writer, &Frame::new(FRAME_HEAD_RESP, head_payload)).await?;
     writer.flush().await?;
+
+    // ── Fountain data plane ─────────────────────────────────────────────
+    //
+    // Only for whole-file requests above the size floor: ranged reads are
+    // already served cheaply, and small files are dominated by the setup cost.
+    let whole_file = start == 0 && end + 1 >= file_size;
+    if use_fec && whole_file && file_size >= super::fec::FEC_MIN_TRANSFER {
+        match serve_get_fec(state, _reader, writer, &path, file_size, addr, session_id).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // The client is mid-protocol and cannot be silently dropped
+                // back onto the frame path, so surface the failure.
+                if state.verbose {
+                    eprintln!("  {} {} FEC transfer failed: {}", "!".yellow(), addr, e);
+                }
+                return Err(e);
+            }
+        }
+    }
 
     // Stream DATA frames
     let mut file = tokio::fs::File::open(&path).await?;
@@ -1005,6 +1463,7 @@ async fn handle_put<R, W>(
     use_crc32: bool,
     addr: SocketAddr,
     session_id: &str,
+    use_fec: bool,
 ) -> AftResult<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -1036,11 +1495,34 @@ where
     let mut hasher = sha2::Sha256::new();
     let mut total_received = 0u64;
 
-    // Receive DATA frames
+    // Receive DATA frames — unless the client offers the fountain data plane,
+    // in which case the bytes arrive as UDP symbols instead.
     loop {
         let data_frame = read_frame(reader, max_payload).await?;
 
         match data_frame.frame_type {
+            FRAME_FEC_OFFER if use_fec => {
+                drop(file);
+                let received = recv_put_fec(
+                    reader,
+                    writer,
+                    &data_frame,
+                    &temp_path,
+                    &path,
+                    addr,
+                    state.verbose,
+                    state.auth_token.as_deref(),
+                )
+                .await?;
+
+                audit::log_file_access(
+                    audit::AuditEventType::FileWrite,
+                    &addr.ip().to_string(),
+                    &req.path,
+                    received,
+                );
+                return Ok(());
+            }
             FRAME_DATA => {
                 // Verify per-frame CRC32 if present (hardware-accelerated)
                 let raw_payload = if use_crc32 && data_frame.flags & FLAG_CRC32 != 0 {

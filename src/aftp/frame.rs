@@ -55,6 +55,20 @@ pub const FRAME_STREAM_DATA: u8 = 0x13;
 pub const FRAME_RESUME: u8 = 0x14;
 pub const FRAME_RESUME_ACK: u8 = 0x15;
 
+// ── FEC data-plane control frames (AFTP v2) ─────────────────────────────────
+//
+// These negotiate and steer the fountain-coded data plane. They travel on the
+// reliable control stream; the symbols themselves travel as UDP datagrams.
+
+/// Sender → receiver: proposed data-plane parameters for a transfer.
+pub const FRAME_FEC_OFFER: u8 = 0x16;
+/// Receiver → sender: accepted parameters and the UDP port to spray at.
+pub const FRAME_FEC_ACCEPT: u8 = 0x17;
+/// Receiver → sender: a block is short; send this many more symbols.
+pub const FRAME_FEC_NEEDMORE: u8 = 0x18;
+/// Receiver → sender: a block decoded and verified; release its buffers.
+pub const FRAME_FEC_BLOCK_OK: u8 = 0x19;
+
 // Flags
 pub const FLAG_COMPRESSED: u8 = 0x01;
 /// Per-frame CRC32 integrity check (hardware-accelerated via SSE4.2 / ARM CRC32).
@@ -71,6 +85,12 @@ pub const CAP_MULTIPLEX: u32 = 0x08;
 pub const CAP_SESSION_RESUME: u32 = 0x10;
 /// Hardware-accelerated per-frame CRC32 integrity (SSE4.2 / ARM CRC32C).
 pub const CAP_CRC32_FRAMES: u32 = 0x20;
+
+/// Peer can carry a transfer over the fountain-coded UDP data plane.
+///
+/// Negotiation is fail-safe: when either side omits this bit the transfer uses
+/// the ordinary reliable frame path, so v1 and v2 peers interoperate.
+pub const CAP_FEC: u32 = 0x40;
 
 // Defaults
 pub const DEFAULT_PORT: u16 = 2600;
@@ -787,4 +807,375 @@ pub fn parse_resume_ack(payload: &[u8]) -> AftResult<ResumeAckPayload> {
         bytes_received,
         path,
     })
+}
+
+// ── Cancellation-safe incremental frame reader ──────────────────────────────
+
+/// Reads frames one `read()` at a time, keeping partial state between calls.
+///
+/// [`read_frame`] is **not** cancellation-safe: it reads a 10-byte header and
+/// then the payload as separate awaits, so a `select!` branch that drops it
+/// after the header has been consumed loses those bytes permanently and every
+/// subsequent frame is misparsed. That is exactly what a bidirectional FEC
+/// transfer does — it must send symbols and read feedback concurrently.
+///
+/// `next_frame` instead performs a single `AsyncReadExt::read` per call, which
+/// *is* cancellation-safe (it either consumes bytes and returns, or is dropped
+/// having consumed none), and holds the partially-assembled frame in `self`.
+/// Dropping the returned future therefore loses nothing.
+pub struct FrameAssembler {
+    header: [u8; HEADER_SIZE],
+    header_filled: usize,
+    parsed: Option<FrameHeader>,
+    payload: Vec<u8>,
+    payload_filled: usize,
+}
+
+impl Default for FrameAssembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FrameAssembler {
+    pub fn new() -> Self {
+        Self {
+            header: [0u8; HEADER_SIZE],
+            header_filled: 0,
+            parsed: None,
+            payload: Vec::new(),
+            payload_filled: 0,
+        }
+    }
+
+    /// Advance by one read. Returns `Ok(Some(frame))` when a whole frame has
+    /// been assembled, `Ok(None)` when more bytes are still needed.
+    pub async fn next_frame<R: AsyncRead + Unpin>(
+        &mut self,
+        r: &mut R,
+        max_payload: u32,
+    ) -> AftResult<Option<Frame>> {
+        use tokio::io::AsyncReadExt;
+
+        // Phase 1: the fixed-size header.
+        if self.parsed.is_none() {
+            let n = r.read(&mut self.header[self.header_filled..]).await?;
+            if n == 0 {
+                return Err(AftError::ConnectionFailed("Connection closed".into()));
+            }
+            self.header_filled += n;
+            if self.header_filled < HEADER_SIZE {
+                return Ok(None);
+            }
+
+            if self.header[0..2] != MAGIC {
+                return Err(AftError::Other("AFTP bad magic".into()));
+            }
+            if self.header[2] != VERSION {
+                return Err(AftError::Other(format!(
+                    "AFTP version mismatch: got {}, expected {}",
+                    self.header[2], VERSION
+                )));
+            }
+            let payload_len = u32::from_le_bytes([
+                self.header[6],
+                self.header[7],
+                self.header[8],
+                self.header[9],
+            ]);
+            if payload_len > max_payload {
+                return Err(AftError::Other(format!(
+                    "AFTP frame payload {} exceeds maximum {}",
+                    payload_len, max_payload
+                )));
+            }
+            self.parsed = Some(FrameHeader {
+                frame_type: self.header[3],
+                flags: self.header[4],
+                payload_len,
+            });
+            self.payload = vec![0u8; payload_len as usize];
+            self.payload_filled = 0;
+        }
+
+        // Phase 2: the payload.
+        let hdr = self.parsed.as_ref().expect("header parsed above");
+        if self.payload_filled < hdr.payload_len as usize {
+            let n = r.read(&mut self.payload[self.payload_filled..]).await?;
+            if n == 0 {
+                return Err(AftError::ConnectionFailed("Connection closed".into()));
+            }
+            self.payload_filled += n;
+            if self.payload_filled < hdr.payload_len as usize {
+                return Ok(None);
+            }
+        }
+
+        let hdr = self.parsed.take().expect("header parsed above");
+        self.header_filled = 0;
+        Ok(Some(Frame {
+            frame_type: hdr.frame_type,
+            flags: hdr.flags,
+            payload: std::mem::take(&mut self.payload),
+        }))
+    }
+}
+
+// ── FEC data-plane frame builders/parsers ───────────────────────────────────
+//
+// The control plane never carries file bytes for a FEC transfer — only the
+// parameters needed to build matching encoders and decoders, and the feedback
+// that tells the sender when to stop.
+
+/// Build FEC_OFFER: `[session_id:8][total_len:8][block_size:4][symbol_size:2]`
+/// `[block_count:4][authenticated:1]`
+pub fn build_fec_offer(
+    session_id: u64,
+    total_len: u64,
+    block_size: u32,
+    symbol_size: u16,
+    block_count: u32,
+    authenticated: bool,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(27);
+    put_u64(&mut buf, session_id);
+    put_u64(&mut buf, total_len);
+    put_u32(&mut buf, block_size);
+    put_u16(&mut buf, symbol_size);
+    put_u32(&mut buf, block_count);
+    put_u8(&mut buf, u8::from(authenticated));
+    buf
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FecOfferPayload {
+    pub session_id: u64,
+    pub total_len: u64,
+    pub block_size: u32,
+    pub symbol_size: u16,
+    pub block_count: u32,
+    pub authenticated: bool,
+}
+
+pub fn parse_fec_offer(payload: &[u8]) -> AftResult<FecOfferPayload> {
+    let mut off = 0;
+    let session_id = get_u64(payload, &mut off)?;
+    let total_len = get_u64(payload, &mut off)?;
+    let block_size = get_u32(payload, &mut off)?;
+    let symbol_size = get_u16(payload, &mut off)?;
+    let block_count = get_u32(payload, &mut off)?;
+    let authenticated = get_u8(payload, &mut off)? != 0;
+
+    // Validate before any of this reaches an allocator or the codec. A peer
+    // that offers a zero symbol size or a block count inconsistent with the
+    // declared length is malformed or hostile, and either way must not be
+    // allowed to drive our buffer sizing.
+    if symbol_size == 0 {
+        return Err(AftError::Other("FEC offer has zero symbol size".into()));
+    }
+    if block_size == 0 {
+        return Err(AftError::Other("FEC offer has zero block size".into()));
+    }
+    if symbol_size as u32 > block_size {
+        return Err(AftError::Other(
+            "FEC offer symbol size exceeds block size".into(),
+        ));
+    }
+    let expected = total_len.div_ceil(block_size as u64);
+    if expected != block_count as u64 {
+        return Err(AftError::Other(format!(
+            "FEC offer block count {} disagrees with {} bytes at {} per block (expected {})",
+            block_count, total_len, block_size, expected
+        )));
+    }
+
+    Ok(FecOfferPayload {
+        session_id,
+        total_len,
+        block_size,
+        symbol_size,
+        block_count,
+        authenticated,
+    })
+}
+
+/// Build FEC_ACCEPT: `[accepted:1][udp_port:2][reason_len:2][reason:N]`
+///
+/// A receiver that cannot or will not use the data plane answers with
+/// `accepted = 0`, and the sender falls back to the reliable frame path.
+pub fn build_fec_accept(accepted: bool, udp_port: u16, reason: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(reason.len() + 8);
+    put_u8(&mut buf, u8::from(accepted));
+    put_u16(&mut buf, udp_port);
+    put_str(&mut buf, reason);
+    buf
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FecAcceptPayload {
+    pub accepted: bool,
+    pub udp_port: u16,
+    pub reason: String,
+}
+
+pub fn parse_fec_accept(payload: &[u8]) -> AftResult<FecAcceptPayload> {
+    let mut off = 0;
+    let accepted = get_u8(payload, &mut off)? != 0;
+    let udp_port = get_u16(payload, &mut off)?;
+    let reason = get_str(payload, &mut off)?;
+    if accepted && udp_port == 0 {
+        return Err(AftError::Other(
+            "FEC accept did not supply a data-plane port".into(),
+        ));
+    }
+    Ok(FecAcceptPayload {
+        accepted,
+        udp_port,
+        reason,
+    })
+}
+
+/// Build FEC_NEEDMORE: `[block_id:4][symbols_needed:4][symbols_received:4]`
+///
+/// `symbols_received` lets the sender estimate the path's loss rate directly
+/// (it knows how many it sent), which is what sizes the next repair round.
+pub fn build_fec_needmore(block_id: u32, symbols_needed: u32, symbols_received: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(12);
+    put_u32(&mut buf, block_id);
+    put_u32(&mut buf, symbols_needed);
+    put_u32(&mut buf, symbols_received);
+    buf
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FecNeedMorePayload {
+    pub block_id: u32,
+    pub symbols_needed: u32,
+    pub symbols_received: u32,
+}
+
+pub fn parse_fec_needmore(payload: &[u8]) -> AftResult<FecNeedMorePayload> {
+    let mut off = 0;
+    let block_id = get_u32(payload, &mut off)?;
+    let symbols_needed = get_u32(payload, &mut off)?;
+    let symbols_received = get_u32(payload, &mut off)?;
+    Ok(FecNeedMorePayload {
+        block_id,
+        symbols_needed,
+        symbols_received,
+    })
+}
+
+/// Build FEC_BLOCK_OK: `[block_id:4][symbols_used:4]`
+pub fn build_fec_block_ok(block_id: u32, symbols_used: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8);
+    put_u32(&mut buf, block_id);
+    put_u32(&mut buf, symbols_used);
+    buf
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FecBlockOkPayload {
+    pub block_id: u32,
+    pub symbols_used: u32,
+}
+
+pub fn parse_fec_block_ok(payload: &[u8]) -> AftResult<FecBlockOkPayload> {
+    let mut off = 0;
+    let block_id = get_u32(payload, &mut off)?;
+    let symbols_used = get_u32(payload, &mut off)?;
+    Ok(FecBlockOkPayload {
+        block_id,
+        symbols_used,
+    })
+}
+
+#[cfg(test)]
+mod assembler_tests {
+    use super::*;
+
+    /// Feed a stream one byte at a time. The assembler must survive being
+    /// polled repeatedly with insufficient data and still yield the exact
+    /// frames — the same situation a `select!` creates when it drops the
+    /// future between reads.
+    #[tokio::test]
+    async fn assembles_frames_from_a_dribbling_stream() {
+        let mut wire = Vec::new();
+        let frames = [
+            Frame::new(FRAME_FEC_BLOCK_OK, build_fec_block_ok(7, 42)),
+            Frame::new(FRAME_FEC_NEEDMORE, build_fec_needmore(3, 9, 100)),
+            Frame::empty(FRAME_PING),
+        ];
+        for f in &frames {
+            write_frame(&mut wire, f).await.unwrap();
+        }
+
+        // A reader that returns at most one byte per call, forcing the
+        // assembler through every possible partial state.
+        struct Dribble<'a> {
+            data: &'a [u8],
+            pos: usize,
+        }
+        impl tokio::io::AsyncRead for Dribble<'_> {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                if self.pos < self.data.len() && buf.remaining() > 0 {
+                    let b = self.data[self.pos];
+                    self.pos += 1;
+                    buf.put_slice(&[b]);
+                }
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut r = Dribble {
+            data: &wire,
+            pos: 0,
+        };
+        let mut asm = FrameAssembler::new();
+        let mut got = Vec::new();
+
+        // Far more polls than bytes, so plenty return `None`.
+        for _ in 0..(wire.len() * 4) {
+            if let Some(f) = asm.next_frame(&mut r, 1 << 20).await.unwrap() {
+                got.push(f);
+            }
+            if got.len() == frames.len() {
+                break;
+            }
+        }
+
+        assert_eq!(got.len(), frames.len(), "did not reassemble every frame");
+        for (a, b) in got.iter().zip(frames.iter()) {
+            assert_eq!(a.frame_type, b.frame_type);
+            assert_eq!(a.payload, b.payload);
+        }
+    }
+
+    /// An oversized declared payload must be refused rather than allocated.
+    #[tokio::test]
+    async fn rejects_payload_over_the_cap() {
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &Frame::new(FRAME_DATA, vec![0u8; 4096]))
+            .await
+            .unwrap();
+
+        let mut asm = FrameAssembler::new();
+        let mut cursor = std::io::Cursor::new(wire);
+        let mut err = None;
+        for _ in 0..64 {
+            match asm.next_frame(&mut cursor, 128).await {
+                Ok(Some(_)) => panic!("oversized frame was accepted"),
+                Ok(None) => continue,
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            }
+        }
+        assert!(err.is_some(), "no error for an over-cap payload");
+    }
 }

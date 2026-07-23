@@ -25,12 +25,9 @@
 //!    avoids allocating a contiguous frame buffer.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Semaphore;
 
 use crate::engine::{ProgressCb, TransferResult};
 use crate::error::{AftError, AftResult};
@@ -304,235 +301,26 @@ pub async fn probe_link(
     }
 }
 
-// ── Turbo download ──────────────────────────────────────────────────────────
-
-/// High-performance download using multiple parallel streams with adaptive
-/// chunk sizing and write-behind pipelining.
-pub async fn turbo_download(
-    _handler: &dyn ProtocolHandler,
-    url: &str,
-    dest: &Path,
-    opts: &ProtocolOptions,
-    config: &TurboConfig,
-    profile: &LinkProfile,
-    total_size: u64,
-    progress_cb: Option<ProgressCb>,
-) -> AftResult<TransferResult> {
-    if total_size > MAX_DOWNLOAD_SIZE {
-        return Err(AftError::TransferFailed(format!(
-            "File size {} exceeds maximum {} bytes",
-            total_size, MAX_DOWNLOAD_SIZE
-        )));
-    }
-
-    let start = Instant::now();
-    let num_streams = profile.recommended_streams;
-    let chunk_size = profile.recommended_chunk;
-    let num_chunks = total_size.div_ceil(chunk_size) as usize;
-
-    // Pre-allocate output file
-    let file = tokio::fs::File::create(dest).await?;
-    file.set_len(total_size).await?;
-    drop(file);
-
-    let dest = dest.to_path_buf();
-    let progress = Arc::new(AtomicU64::new(0));
-    let semaphore = Arc::new(Semaphore::new(num_streams));
-    let rate_limit = config.rate_limit;
-    let transfer_start = start;
-
-    // Build chunk list
-    let chunks: Vec<(u64, u64)> = (0..num_chunks)
-        .map(|i| {
-            let s = (i as u64) * chunk_size;
-            let e = (s + chunk_size - 1).min(total_size - 1);
-            (s, e)
-        })
-        .collect();
-
-    let mut handles = Vec::with_capacity(num_chunks);
-
-    for (chunk_start, chunk_end) in chunks {
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| AftError::Other(e.to_string()))?;
-
-        let opts = opts.clone();
-        let dest = dest.clone();
-        let progress = progress.clone();
-        let progress_cb = progress_cb.clone();
-        let url = url.to_string();
-        let t_start = transfer_start;
-
-        let handle = tokio::spawn(async move {
-            let handler = crate::protocols::resolve_protocol(&url)?;
-            let data = handler
-                .download_range(&url, chunk_start, chunk_end, &opts)
-                .await?;
-
-            // Write to correct offset — use a write buffer
-            let mut file = tokio::fs::OpenOptions::new()
-                .write(true)
-                .open(&dest)
-                .await?;
-            use tokio::io::AsyncSeekExt;
-            file.seek(std::io::SeekFrom::Start(chunk_start)).await?;
-
-            // Write in IO_BUF_SIZE slices for OS buffer friendliness
-            let mut written = 0usize;
-            while written < data.len() {
-                let end = (written + IO_BUF_SIZE).min(data.len());
-                file.write_all(&data[written..end]).await?;
-                written = end;
-            }
-            file.flush().await?;
-
-            let chunk_bytes = data.len() as u64;
-            let total = progress.fetch_add(chunk_bytes, Ordering::Relaxed) + chunk_bytes;
-            if let Some(ref cb) = progress_cb {
-                cb(total, Some(total_size));
-            }
-
-            // Rate limiting
-            if rate_limit > 0 {
-                let elapsed = t_start.elapsed().as_secs_f64();
-                let expected = total as f64 / rate_limit as f64;
-                if expected > elapsed {
-                    tokio::time::sleep(Duration::from_secs_f64(expected - elapsed)).await;
-                }
-            }
-
-            drop(permit);
-            Ok::<u64, AftError>(chunk_bytes)
-        });
-
-        handles.push(handle);
-    }
-
-    let mut total_bytes = 0u64;
-    for handle in handles {
-        total_bytes += handle.await.map_err(|e| AftError::Other(e.to_string()))??;
-    }
-
-    let duration = start.elapsed();
-    let duration_ms = duration.as_millis() as u64;
-    let throughput = if duration_ms > 0 {
-        total_bytes as f64 / duration.as_secs_f64()
-    } else {
-        0.0
-    };
-
-    Ok(TransferResult {
-        bytes_transferred: total_bytes,
-        duration_ms,
-        throughput_bytes_per_sec: throughput,
-        checksum: None,
-        retries_used: 0,
-        chunks_used: num_chunks,
-    })
-}
-
 // ── Turbo upload ────────────────────────────────────────────────────────────
 
-/// High-performance upload using memory-mapped reads and write-behind
-/// pipelining for local → remote transfers.
+/// Upload a local file through the protocol handler, timing the transfer.
+///
+/// Note on `mmap`: the `ProtocolHandler::upload` contract takes a source
+/// *path*, not a byte slice, so each handler owns its own read strategy and
+/// there is nothing for this layer to memory-map. An earlier version of this
+/// module had separate `turbo_upload_mmap` and `turbo_upload_buffered`
+/// functions, but their bodies were identical and neither mapped anything.
+/// Real zero-copy `mmap` does exist for local→local copies — see
+/// [`turbo_local_copy_mmap`]. Making uploads genuinely zero-copy requires
+/// widening the handler trait to accept a borrowed buffer, which is tracked
+/// for the FEC data plane rather than bolted on here.
 pub async fn turbo_upload(
     handler: &dyn ProtocolHandler,
     source: &Path,
     url: &str,
     opts: &ProtocolOptions,
-    config: &TurboConfig,
+    _config: &TurboConfig,
     _profile: &LinkProfile,
-    content_type: Option<&str>,
-    method: Option<&str>,
-    progress_cb: Option<ProgressCb>,
-) -> AftResult<TransferResult> {
-    let _start = Instant::now();
-
-    // For uploads we use the write-behind pipeline:
-    // Read source in large chunks → queue for async upload
-    let file_size = tokio::fs::metadata(source).await?.len();
-
-    if config.mmap && file_size > TURBO_THRESHOLD {
-        // Memory-mapped read path
-        turbo_upload_mmap(
-            handler,
-            source,
-            url,
-            opts,
-            file_size,
-            content_type,
-            method,
-            progress_cb,
-        )
-        .await
-    } else {
-        // Large-buffer streaming read
-        turbo_upload_buffered(
-            handler,
-            source,
-            url,
-            opts,
-            content_type,
-            method,
-            progress_cb,
-        )
-        .await
-    }
-}
-
-/// Upload using mmap for zero-copy source reads.  Falls back to buffered
-/// if mmap is unavailable.
-async fn turbo_upload_mmap(
-    handler: &dyn ProtocolHandler,
-    source: &Path,
-    url: &str,
-    opts: &ProtocolOptions,
-    _file_size: u64,
-    content_type: Option<&str>,
-    method: Option<&str>,
-    progress_cb: Option<ProgressCb>,
-) -> AftResult<TransferResult> {
-    let start = Instant::now();
-
-    // Use standard upload path but with progress — the protocol handler
-    // reads from the source file path.  The mmap advantage is realised
-    // when the handler itself is local or AFTP (which reads the file).
-    let cb = progress_cb.map(|cb| {
-        Box::new(move |bytes: u64, total: Option<u64>| cb(bytes, total))
-            as Box<dyn Fn(u64, Option<u64>) + Send + Sync>
-    });
-
-    let bytes = handler
-        .upload(source, url, opts, content_type, method, cb)
-        .await?;
-
-    let duration = start.elapsed();
-    let duration_ms = duration.as_millis() as u64;
-    let throughput = if duration_ms > 0 {
-        bytes as f64 / duration.as_secs_f64()
-    } else {
-        0.0
-    };
-
-    Ok(TransferResult {
-        bytes_transferred: bytes,
-        duration_ms,
-        throughput_bytes_per_sec: throughput,
-        checksum: None,
-        retries_used: 0,
-        chunks_used: 1,
-    })
-}
-
-/// Upload with 4 MB buffered reads.
-async fn turbo_upload_buffered(
-    handler: &dyn ProtocolHandler,
-    source: &Path,
-    url: &str,
-    opts: &ProtocolOptions,
     content_type: Option<&str>,
     method: Option<&str>,
     progress_cb: Option<ProgressCb>,
@@ -796,86 +584,9 @@ async fn turbo_local_copy_buffered(
     Ok(total)
 }
 
-// ── Socket tuning helpers ───────────────────────────────────────────────────
-
-/// Apply aggressive socket tuning to a TCP stream: large send/recv buffers,
-/// TCP_NODELAY, and (on Linux) TCP_QUICKACK.
-#[cfg(unix)]
-pub fn tune_socket(fd: std::os::unix::io::RawFd, buf_size: u32) {
-    use std::mem::size_of;
-    let buf = buf_size as libc::c_int;
-    unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_SNDBUF,
-            &buf as *const _ as *const libc::c_void,
-            size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            &buf as *const _ as *const libc::c_void,
-            size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        // TCP_NODELAY
-        let one: libc::c_int = 1;
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_NODELAY,
-            &one as *const _ as *const libc::c_void,
-            size_of::<libc::c_int>() as libc::socklen_t,
-        );
-    }
-    // TCP_QUICKACK on Linux — disable delayed ACK
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let one: libc::c_int = 1;
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            12, // TCP_QUICKACK
-            &one as *const _ as *const libc::c_void,
-            size_of::<libc::c_int>() as libc::socklen_t,
-        );
-    }
-}
-
-/// Windows socket tuning via Winsock2.
-#[cfg(windows)]
-pub fn tune_socket_win(socket: std::os::windows::io::RawSocket, buf_size: u32) {
-    use std::mem::size_of;
-    let buf = buf_size as i32;
-    unsafe {
-        // SO_SNDBUF
-        windows_sys::Win32::Networking::WinSock::setsockopt(
-            socket as usize,
-            windows_sys::Win32::Networking::WinSock::SOL_SOCKET as i32,
-            windows_sys::Win32::Networking::WinSock::SO_SNDBUF as i32,
-            &buf as *const i32 as *const u8,
-            size_of::<i32>() as i32,
-        );
-        // SO_RCVBUF
-        windows_sys::Win32::Networking::WinSock::setsockopt(
-            socket as usize,
-            windows_sys::Win32::Networking::WinSock::SOL_SOCKET as i32,
-            windows_sys::Win32::Networking::WinSock::SO_RCVBUF as i32,
-            &buf as *const i32 as *const u8,
-            size_of::<i32>() as i32,
-        );
-        // TCP_NODELAY
-        let one: i32 = 1;
-        windows_sys::Win32::Networking::WinSock::setsockopt(
-            socket as usize,
-            windows_sys::Win32::Networking::WinSock::IPPROTO_TCP,
-            windows_sys::Win32::Networking::WinSock::TCP_NODELAY as i32,
-            &one as *const i32 as *const u8,
-            size_of::<i32>() as i32,
-        );
-    }
-}
+// NOTE: socket tuning lives in `crate::aftp::transport::tune_tcp_socket`, which
+// is applied to every AFTP socket on the listener, connector, and client paths.
+// This module previously carried an unused duplicate that was never called.
 
 // ── Adaptive chunk ramp ─────────────────────────────────────────────────────
 
@@ -943,7 +654,12 @@ pub async fn turbo_download_auto(
     };
 
     let is_local_link = url_is_local || head_rtt_us < 5_000;
-    let streams = if turbo_config.streams > 0 {
+    // Protocols that stream over one persistent connection are hurt by
+    // parallel ranges, not helped — see `benefits_from_parallel_ranges`.
+    let parallel_helps = handler.benefits_from_parallel_ranges();
+    let streams = if !parallel_helps {
+        1
+    } else if turbo_config.streams > 0 {
         turbo_config.streams.min(MAX_STREAMS)
     } else if is_local_link {
         1 // localhost: single stream avoids parallel overhead
@@ -965,7 +681,10 @@ pub async fn turbo_download_auto(
         recommended_sock_buf: TARGET_SOCK_BUF,
         recommended_streams: streams,
         recommended_chunk: chunk,
-        mode: if supports_ranges && total_size.map_or(false, |s| s >= TURBO_THRESHOLD) {
+        mode: if supports_ranges
+            && parallel_helps
+            && total_size.map_or(false, |s| s >= TURBO_THRESHOLD)
+        {
             TransferMode::MultiStream
         } else {
             TransferMode::Standard
@@ -974,7 +693,11 @@ pub async fn turbo_download_auto(
 
     // Use the standard engine with turbo-recommended parallel/chunk settings.
     let config = crate::engine::TransferConfig {
-        parallel_chunks: if supports_ranges { streams } else { 1 },
+        parallel_chunks: if supports_ranges && parallel_helps {
+            streams
+        } else {
+            1
+        },
         chunk_size: chunk,
         ..Default::default()
     };
@@ -995,8 +718,8 @@ pub async fn turbo_upload_auto(
 ) -> AftResult<(TransferResult, LinkProfile)> {
     let profile = LinkProfile::default();
 
-    // Turbo upload uses mmap reads when available, otherwise large buffers.
-    // Delegates directly to turbo_upload without an expensive link probe.
+    // Delegates directly to turbo_upload without an expensive link probe; the
+    // handler owns the read strategy (see the note on `turbo_upload`).
     let result = turbo_upload(
         handler,
         source,

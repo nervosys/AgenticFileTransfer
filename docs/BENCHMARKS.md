@@ -236,23 +236,78 @@ Hardware acceleration is the key differentiator. AFT auto-detects and uses
 SSE4.2, SHA-NI, and AES-NI instructions, eliminating integrity and encryption as
 bottlenecks.
 
-### Transfer Tool Class Comparison
+### Feature Comparison (illustrative, not measured)
 
-| Tool Class         | Typical Throughput | Integrity       | Encryption              | Protocol Overhead    |
-| ------------------ | ------------------ | --------------- | ----------------------- | -------------------- |
-| **AFT (AFTP)**     | **Disk-speed**     | CRC32 + SHA-256 | AES-256-GCM + Kyber1024 | 0.001% (10 B / 1 MB) |
-| curl / wget (HTTP) | Disk-speed         | Optional        | TLS                     | 0.02–0.08%           |
-| rsync              | ~500 MiB/s         | MD5 / xxHash    | SSH tunnel              | Variable             |
-| scp / sftp         | ~200–400 MiB/s     | HMAC            | SSH                     | SSH framing          |
-| Globus GridFTP     | ~1 GiB/s           | CRC32           | GSI / TLS               | GridFTP framing      |
-| Aspera FASP        | ~1 GiB/s           | SHA-1           | AES-128                 | UDP-based            |
-| HPN-SSH            | ~500 MiB/s         | HMAC            | SSH                     | SSH + HPN patches    |
-| robocopy (Windows) | ~1 GiB/s           | None            | None                    | SMB                  |
-| rclone             | Variable           | MD5 / SHA-1     | TLS                     | HTTP-based           |
+The table below compares *capabilities*, not performance. The throughput
+figures for third-party tools are typical published numbers, **not**
+head-to-head measurements — see the next section for those.
 
-AFT achieves disk-speed transfers with full CRC32 + SHA-256 integrity, optional
-post-quantum encryption, 0.001% protocol overhead, and adaptive multi-stream
-parallelism — a combination no other tool in this class provides.
+| Tool Class         | Integrity       | Encryption              | Protocol Overhead    |
+| ------------------ | --------------- | ----------------------- | -------------------- |
+| **AFT (AFTP)**     | CRC32 + SHA-256 | AES-256-GCM + Kyber1024 | 0.001% (10 B / 1 MB) |
+| curl / wget (HTTP) | Optional        | TLS                     | 0.02–0.08%           |
+| rsync              | MD5 / xxHash    | SSH tunnel              | Variable             |
+| scp / sftp         | HMAC            | SSH                     | SSH framing          |
+| rclone             | MD5 / SHA-1     | TLS                     | HTTP-based           |
+
+### Measured Head-to-Head: Lossy and Latent Links
+
+Measured on WSL2 Debian using network namespaces joined by a veth pair, shaped
+in **both directions** with `tc` HTB + netem. Contenders: AFT (this repo,
+release build), [ATP](https://github.com/Dicklesworthstone/atp) built from
+source (asupersync, TCP mode and RaptorQ mode with
+`--rq-allow-unauthenticated-lab`), and rsync over ssh. Workload: one 50 MB
+file, cold destination, byte-verified after transfer. Median of 3 runs; peak
+RSS via `/usr/bin/time -v`. Raw rows: [`bench/results_fec_final.jsonl`](../bench/results_fec_final.jsonl)
+(aft --fec, final binary) and [`bench/results_fec.jsonl`](../bench/results_fec.jsonl)
+(all other tools), produced by the harness in [`bench/harness/`](../bench/harness/).
+
+Network regimes (mirroring ATP's own benchmark matrix):
+
+| Regime | Rate     | Delay      | Loss | Other                  |
+| ------ | -------- | ---------- | ---- | ---------------------- |
+| good   | 200 Mbit | 25 ms      | 0.1% | —                      |
+| bad    | 50 Mbit  | 80 ± 20 ms | 2%   | —                      |
+| broken | 10 Mbit  | 200 ± 50 ms| 10%  | 5% reorder, 1% dup     |
+
+Median wall-clock seconds (lower is better; `timeout` = no run finished
+within the cell's time limit):
+
+| Tool             | good      | bad         | broken       | RSS (good) |
+| ---------------- | --------- | ----------- | ------------ | ---------- |
+| **aft --fec**    | 3.2       | **13.0**    | **103**      | ~152 MB    |
+| aft (TCP path)   | 3.9       | timeout     | timeout      | ~55 MB     |
+| atp (TCP mode)   | **2.9**   | timeout     | timeout      | ~10 MB     |
+| atp (RaptorQ)    | 4.5       | timeout     | timeout      | ~13 MB     |
+| rsync (ssh)      | 3.2       | timeout     | timeout      | ~8 MB      |
+
+On the `bad` regime, `aft --fec` was the **only tool to complete at all**
+(6/6 runs, byte-exact, median 13.0 s) — every TCP-based contender exceeded its
+150–300 s timeout, which matches theory: TCP throughput ≈ MSS/(RTT·√p) ≈
+130 KB/s at 80 ms RTT and 2% loss, i.e. ~385 s for 50 MB before protocol
+overhead. On `broken`, `aft --fec` completed 3/3 runs (89.7 / 103.2 / 233.9 s,
+median 103.2 s); nothing else completed any. The BBR-style pacer converges
+from delivery-rate feedback carried on the control plane, so the sender finds
+the bottleneck rate instead of flooding it — which is what lets the lossy
+regimes finish at all.
+
+**Honest caveats — read before quoting these numbers:**
+
+1. **ATP's RaptorQ-mode failures may be environmental.** They reproduce
+   consistently across two independent runs (errors/hash mismatches on lossy
+   regimes), but could stem from the specific asupersync build, the
+   `--rq-allow-unauthenticated-lab` flag, or interaction with netem — not
+   necessarily from ATP's design. These results support "AFT's FEC path
+   survives links where our ATP build did not," not "AFT's algorithm beats
+   ATP's."
+2. **Memory is AFT's cost.** `aft --fec` peaks at ~136–160 MB RSS (window ×
+   8 MiB blocks + RaptorQ working set) versus ~8–13 MB for rsync and ATP.
+   The RSS is bounded and independent of file size, but it is roughly 12–15×
+   the other tools'.
+3. **Broken-regime variance is high.** ~10 Mbit at 10% loss with reordering
+   leaves little headroom; runs ranged 89.7–233.9 s and pure wire time for
+   50 MB at 10 Mbit is ~42 s, so real room to improve remains — it just beats
+   a field where nothing else finishes.
 
 ---
 
@@ -282,8 +337,14 @@ bottleneck — disk I/O and network bandwidth are.
 
 ### Turbo Engine Design
 
-AFT's turbo transfer engine adds adaptive parallelism (8–128 streams),
-BDP-aware 16 MiB socket buffers, memory-mapped zero-copy reads, write-behind
-pipelining, and adaptive chunk sizing (1 MB → 64 MB). These are in addition to
-the hardware-accelerated primitives measured here. Together, they ensure AFT
-saturates any available bandwidth.
+AFT's turbo engine probes the link (HEAD request timing) and dispatches to the
+standard transfer engine with tuned parameters: parallel range requests when
+the protocol benefits from them, and chunk sizes selected by link locality.
+AFTP TCP sockets get 16 MiB send/receive buffers (`tune_tcp_socket`), and the
+FEC UDP data plane gets 8 MiB buffers. Uploads read through each protocol
+handler's own I/O path — there is no memory-mapped upload; real `mmap` is used
+only for local→local copies.
+
+On lossy or high-latency links, none of this tuning matters: TCP collapses
+regardless (see the head-to-head above). That is what the `--fec` RaptorQ
+data plane is for.

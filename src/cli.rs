@@ -103,6 +103,15 @@ pub struct Cli {
     /// Maximum bandwidth in bytes per second (0 = unlimited)
     #[arg(long, default_value = "0", global = true)]
     pub rate_limit: u64,
+
+    /// Use the fountain-coded UDP data plane for AFTP transfers.
+    ///
+    /// Carries file data as RaptorQ symbols over UDP instead of a reliable
+    /// stream, so packet loss costs extra bandwidth rather than round trips.
+    /// Substantially faster on lossy or high-latency links. Negotiated: falls
+    /// back to the reliable path against a server that does not support it.
+    #[arg(long, global = true)]
+    pub fec: bool,
     /// Enable turbo transfer mode: adaptive multi-stream, mmap, socket tuning
     #[arg(long, global = true)]
     pub turbo: bool,
@@ -410,6 +419,10 @@ pub enum Command {
         /// Maximum directory depth (0 = unlimited)
         #[arg(long, default_value = "0")]
         max_depth: usize,
+
+        /// Number of files to transfer concurrently (1 = sequential)
+        #[arg(long, default_value = "8")]
+        transfers: usize,
     },
 
     /// Move (rename) a file or directory

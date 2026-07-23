@@ -1,0 +1,33 @@
+{"tool": "aft-fec", "workload": "single_50m", "regime": "good", "run": 1, "status": "ok", "seconds": 3.078469, "rss_kb": 143256, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "good", "run": 2, "status": "ok", "seconds": 3.007068, "rss_kb": 151112, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "good", "run": 3, "status": "ok", "seconds": 3.01655, "rss_kb": 149204, "bytes": 52428800, "note": ""}
+{"tool": "aft", "workload": "single_50m", "regime": "good", "run": 1, "status": "ok", "seconds": 4.629229, "rss_kb": 47664, "bytes": 52428800, "note": ""}
+{"tool": "aft", "workload": "single_50m", "regime": "good", "run": 2, "status": "ok", "seconds": 3.875722, "rss_kb": 56164, "bytes": 52428800, "note": ""}
+{"tool": "aft", "workload": "single_50m", "regime": "good", "run": 3, "status": "ok", "seconds": 3.209642, "rss_kb": 58036, "bytes": 52428800, "note": ""}
+{"tool": "atp-rq", "workload": "single_50m", "regime": "good", "run": 1, "status": "ok", "seconds": 4.510483, "rss_kb": 11624, "bytes": 52428800, "note": ""}
+{"tool": "atp-rq", "workload": "single_50m", "regime": "good", "run": 2, "status": "ok", "seconds": 29.777428, "rss_kb": 14112, "bytes": 52428800, "note": ""}
+{"tool": "atp-rq", "workload": "single_50m", "regime": "good", "run": 3, "status": "ok", "seconds": 2.73558, "rss_kb": 13624, "bytes": 52428800, "note": ""}
+{"tool": "atp-tcp", "workload": "single_50m", "regime": "good", "run": 1, "status": "ok", "seconds": 2.831506, "rss_kb": 10780, "bytes": 52428800, "note": ""}
+{"tool": "atp-tcp", "workload": "single_50m", "regime": "good", "run": 2, "status": "ok", "seconds": 2.961662, "rss_kb": 9808, "bytes": 52428800, "note": ""}
+{"tool": "atp-tcp", "workload": "single_50m", "regime": "good", "run": 3, "status": "ok", "seconds": 2.901584, "rss_kb": 10408, "bytes": 52428800, "note": ""}
+{"tool": "rsync", "workload": "single_50m", "regime": "good", "run": 1, "status": "ok", "seconds": 3.72819, "rss_kb": 8268, "bytes": 52428800, "note": ""}
+{"tool": "rsync", "workload": "single_50m", "regime": "good", "run": 2, "status": "ok", "seconds": 3.227732, "rss_kb": 8072, "bytes": 52428800, "note": ""}
+{"tool": "rsync", "workload": "single_50m", "regime": "good", "run": 3, "status": "ok", "seconds": 3.20279, "rss_kb": 8072, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "bad", "run": 1, "status": "ok", "seconds": 22.766416, "rss_kb": 158976, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "bad", "run": 2, "status": "ok", "seconds": 32.478358, "rss_kb": 152608, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "bad", "run": 3, "status": "ok", "seconds": 19.944254, "rss_kb": 156292, "bytes": 52428800, "note": ""}
+{"tool": "aft", "workload": "single_50m", "regime": "bad", "run": 1, "status": "timeout", "seconds": 300.003487, "rss_kb": null, "bytes": 27262976, "note": "exceeded 300s timeout"}
+{"tool": "aft", "workload": "single_50m", "regime": "bad", "run": 2, "status": "timeout", "seconds": 300.003724, "rss_kb": null, "bytes": 30408704, "note": "exceeded 300s timeout"}
+{"tool": "aft", "workload": "single_50m", "regime": "bad", "run": 3, "status": "timeout", "seconds": 300.013696, "rss_kb": null, "bytes": 28311552, "note": "exceeded 300s timeout"}
+{"tool": "atp-rq", "workload": "single_50m", "regime": "bad", "run": 1, "status": "timeout", "seconds": 300.004206, "rss_kb": null, "bytes": 52428800, "note": "exceeded 300s timeout"}
+{"tool": "atp-rq", "workload": "single_50m", "regime": "bad", "run": 2, "status": "timeout", "seconds": 300.040165, "rss_kb": null, "bytes": 52428800, "note": "exceeded 300s timeout"}
+{"tool": "atp-rq", "workload": "single_50m", "regime": "bad", "run": 3, "status": "timeout", "seconds": 300.004349, "rss_kb": null, "bytes": 52428800, "note": "exceeded 300s timeout"}
+{"tool": "atp-tcp", "workload": "single_50m", "regime": "bad", "run": 1, "status": "timeout", "seconds": 300.007577, "rss_kb": null, "bytes": 26738688, "note": "exceeded 300s timeout"}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "broken", "run": 1, "status": "ok", "seconds": 241.613545, "rss_kb": 177072, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "broken", "run": 2, "status": "ok", "seconds": 206.891639, "rss_kb": 166684, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "broken", "run": 3, "status": "timeout", "seconds": 250.003287, "rss_kb": null, "bytes": 52428800, "note": "exceeded 250s timeout"}
+{"tool": "aft", "workload": "single_50m", "regime": "broken", "run": 1, "status": "timeout", "seconds": 150.003945, "rss_kb": null, "bytes": 1048576, "note": "exceeded 150s timeout"}
+{"tool": "atp-rq", "workload": "single_50m", "regime": "broken", "run": 1, "status": "timeout", "seconds": 150.003268, "rss_kb": null, "bytes": 52428800, "note": "exceeded 150s timeout"}
+{"tool": "atp-tcp", "workload": "single_50m", "regime": "broken", "run": 1, "status": "timeout", "seconds": 150.002931, "rss_kb": null, "bytes": 1835008, "note": "exceeded 150s timeout"}
+{"tool": "rsync", "workload": "single_50m", "regime": "broken", "run": 1, "status": "timeout", "seconds": 150.00323, "rss_kb": null, "bytes": 1835008, "note": "exceeded 150s timeout"}
+{"tool": "rsync", "workload": "single_50m", "regime": "bad", "run": 1, "status": "timeout", "seconds": 150.012875, "rss_kb": null, "bytes": 15728640, "note": "exceeded 150s timeout"}
