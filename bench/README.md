@@ -50,9 +50,12 @@ recorded as a failure row, never silently dropped.
   (adaptive receiver patience + sample-driven BBR pacing with a startup guard,
   per-interval delivery deltas, and loss-hint decay); these are the aft --fec
   rows quoted in the docs. good 3.2 s (6/6), bad 13.0 s (6/6), broken 103 s (3/3).
-- `results_tcp_bbr.jsonl` — `aft` TCP path (no `--fec`) once it requests BBR
-  congestion control per-socket; the `aft (TCP + BBR)` rows in the docs.
-  bad 14.8 s (3/3), broken timeout (3/3). Requires `modprobe tcp_bbr` on the host.
+- `results_tcp_bbr.jsonl` — `aft` TCP path (no `--fec`) with BBR on the lossy
+  regimes: bad 14.8 s (3/3), broken timeout (3/3). Requires `modprobe tcp_bbr`.
+- `results_good_9run.jsonl` — the `good` regime measured at 9 runs per tool
+  (that regime is high-variance; 3 runs is too few for a stable median). aft
+  (TCP, BBR default) 2.8 s — fastest and tightest — vs atp-tcp 3.0, atp-rq 3.0,
+  rsync 3.3, aft --fec 3.4. These are the `good`-column figures in the docs.
 
 These are the raw data behind the measured tables in
 [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).

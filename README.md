@@ -11,10 +11,11 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
   streaming SHA-256, TLS/mTLS, HMAC-SHA256 challenge/response auth, and TCP_NODELAY
 - **Built-in file server** — `aft serve` exposes any directory over AFTP with optional
   TLS, authentication, and compression
-- **Loss-resilient TCP** — AFT requests **BBR** congestion control on its sockets
-  (`setsockopt(TCP_CONGESTION, "bbr")`, Linux, best-effort). BBR ignores random loss
-  as a congestion signal, so on a 2%-loss / 80 ms link the TCP path finishes a 50 MB
-  transfer in ~15 s where the default CUBIC collapses and times out
+- **BBR-paced TCP** — AFT requests **BBR** congestion control on its sockets by default
+  (`setsockopt(TCP_CONGESTION, "bbr")`, Linux, best-effort; override with `AFT_TCP_CC`).
+  BBR paces to bottleneck bandwidth and ignores random loss, so the TCP path is both the
+  **fastest tool measured on a clean link** (2.8 s for 50 MB, tightest distribution) and
+  still finishes a 2%-loss transfer in ~15 s where CUBIC-based tools collapse and time out
 - **Fountain-coded UDP data plane (`--fec`)** — RaptorQ symbols over UDP with a TCP
   control plane, HMAC-authenticated symbols, BBR-style pacing, and stage-verify-commit
   integrity. For links so lossy that reliable TCP cannot drain at all (10% loss +
@@ -369,11 +370,12 @@ are HMAC-authenticated, blocks are staged and SHA-256-verified before commit,
 and delivery is BBR-paced. The flag is negotiated — against a server without
 FEC support the client silently uses the reliable TCP path.
 
-When to reach for `--fec` versus the (BBR-tuned) TCP path, measured on
+When to reach for `--fec` versus the default (BBR) TCP path, measured on
 netem-shaped links, 50 MB file:
 
-- **2% loss / 80 ms RTT:** the TCP path with BBR already finishes in ~15 s at
-  ~47 MB RSS — you do not need FEC. (CUBIC-based tools time out here.)
+- **Clean or ≤2% loss:** stay on the TCP path — it is fastest on a clean link
+  (2.8 s) and still finishes a 2%-loss transfer in ~15 s at ~47 MB RSS, where
+  CUBIC-based tools time out. No FEC needed.
 - **10% loss + reordering / 200 ms RTT:** reliable TCP cannot drain at all —
   even BBR-TCP times out, because every lost byte still costs a retransmit.
   `--fec` completes in ~103 s median (3/3), the only tool tested that finishes.
@@ -680,29 +682,34 @@ pub trait ProtocolHandler: Send + Sync {
 [ATP](https://github.com/Dicklesworthstone/atp) in TCP and RaptorQ modes, and
 rsync over ssh. `timeout` = no run completed within the cell's limit.
 
-| Regime                              | aft `--fec`         | aft (TCP + BBR)   | atp (TCP) | atp (RaptorQ) | rsync (ssh) |
-| ----------------------------------- | ------------------- | ----------------- | --------- | ------------- | ----------- |
-| **good** (200 Mbit, 25 ms, 0.1%)    | 3.2 s               | 3.9 s             | **2.9 s** | 4.5 s         | 3.2 s       |
-| **bad** (50 Mbit, 80 ms, 2% loss)   | 13.0 s              | **14.8 s**        | timeout   | timeout       | timeout     |
-| **broken** (10 Mbit, 200 ms, 10% loss + reorder) | **103 s** | timeout           | timeout   | timeout       | timeout     |
+| Regime                              | aft (TCP) | aft `--fec` | atp (TCP) | atp (RaptorQ) | rsync (ssh) |
+| ----------------------------------- | --------- | ----------- | --------- | ------------- | ----------- |
+| **good** (200 Mbit, 25 ms, 0.1%)    | **2.8 s** | 3.4 s       | 3.0 s     | 3.0 s         | 3.3 s       |
+| **bad** (50 Mbit, 80 ms, 2% loss)   | 14.8 s    | **13.0 s**  | timeout   | timeout       | timeout     |
+| **broken** (10 Mbit, 200 ms, 10% loss + reorder) | timeout | **103 s** | timeout | timeout   | timeout     |
 
-Two AFT paths, two jobs:
+`good` is a median of 9 runs (high-variance regime), `bad`/`broken` medians of
+3–6 runs. Three regimes, three outcomes — AFT is fastest or the only finisher
+in every one:
 
-- **Moderate loss (~2%)** — the plain TCP path handles it once it stops using
-  CUBIC. AFT requests **BBR** congestion control per-socket, which ignores
-  random loss as a congestion signal, so a transfer that collapses to a timeout
-  under CUBIC (the default every other tool here uses) finishes in ~15 s at
-  ~47 MB RSS.
-- **Severe loss (10% + reordering)** — reliable TCP cannot drain at all, even
-  with BBR: every lost byte still costs a retransmit round trip. Here `--fec`
-  is the **only** transport tested that completes, because a fountain code
-  turns loss into extra repair bandwidth instead of round trips. Cost: ~150 MB
-  peak RSS (bounded, independent of file size) versus ~47 MB for the TCP path.
+- **Clean (`good`)** — AFT's TCP path is the **fastest tool measured, 2.8 s**,
+  ahead of atp (3.0 s) and rsync (3.3 s), and the most consistent (all 9 runs
+  in 2.74–2.92 s). It requests **BBR** congestion control by default
+  (`AFT_TCP_CC` to override); BBR's pacing keeps the tail tight where CUBIC's
+  response to the occasional random drop makes the other tools bimodal.
+- **Moderate loss (`bad`)** — CUBIC-based tools collapse to a timeout; AFT's
+  BBR TCP path finishes in ~15 s at ~47 MB RSS (or `--fec` in ~13 s).
+- **Severe loss (`broken`)** — reliable TCP cannot drain at all, even with BBR:
+  every lost byte still costs a retransmit round trip. `--fec` is the **only**
+  transport tested that completes (~103 s), because a fountain code turns loss
+  into extra repair bandwidth instead of round trips. Cost: ~150 MB peak RSS
+  (bounded, file-size independent) versus ~47 MB for the TCP path.
 
 Every number is reproducible from the netem harness and raw result data in
 [`bench/`](bench/); full methodology, per-run figures, and caveats are in
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md). (The `bad` TCP result requires the
-`tcp_bbr` kernel module; where BBR is unavailable, use `--fec`.)
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md). (TCP-path results assume the `tcp_bbr`
+kernel module is loaded; where BBR is unavailable AFT falls back to the kernel
+default and lossy links need `--fec`.)
 
 ## FIPS 140-3 Build
 

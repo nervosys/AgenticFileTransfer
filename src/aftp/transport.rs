@@ -44,6 +44,24 @@ pub trait TransportConnector: Send + Sync {
 /// Target socket buffer size for high-throughput transfers (16 MiB).
 const TARGET_SOCK_BUF: u32 = 16 * 1024 * 1024;
 
+/// The TCP congestion-control algorithm to request on data sockets (Linux).
+///
+/// Defaults to `bbr`. Measured across netem regimes, BBR is the best all-round
+/// choice: on a clean link its median wall clock matches CUBIC's but with far
+/// tighter tails (CUBIC's response to the occasional random drop is a window
+/// cut, so its distribution is bimodal — some transfers take ~1.5× longer),
+/// and on a lossy link BBR keeps going where CUBIC collapses to
+/// ~MSS/(RTT*sqrt(p)). Operators can override with `AFT_TCP_CC` — e.g.
+/// `AFT_TCP_CC=cubic` to match the kernel default, or any other installed
+/// algorithm. An empty value keeps whatever the kernel default is. `--fec`
+/// remains the answer for links so lossy no reliable algorithm can drain them.
+#[cfg(target_os = "linux")]
+fn tcp_congestion_control() -> String {
+    std::env::var("AFT_TCP_CC")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_else(|_| "bbr".to_string())
+}
+
 /// Tune a TCP socket for high-throughput transfers by enlarging send/receive
 /// buffers and enabling low-latency options.
 ///
@@ -83,32 +101,35 @@ pub(crate) fn tune_tcp_socket(stream: &TcpStream) {
                     std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                 );
 
-                // Ask the kernel for BBR congestion control. The default
-                // (CUBIC) is loss-based: it reads every dropped segment as a
-                // congestion signal and multiplicatively cuts its window, so
-                // on a link with random, non-congestive loss its throughput
-                // collapses to ~MSS/(RTT*sqrt(p)) — a few hundred KB/s at 2%
-                // loss regardless of how much bandwidth is free. BBR instead
-                // models bottleneck bandwidth and round-trip propagation and
-                // paces to them, ignoring loss as a signal, so it stays near
-                // line rate on exactly the lossy/latent links where CUBIC
-                // falls apart. This is the same idea as the FEC data plane's
-                // pacer, one layer down for the reliable TCP path.
+                // Pick TCP congestion control by link character. The kernel
+                // default (CUBIC) is loss-based: it reads every dropped
+                // segment as congestion and cuts its window, so on a link with
+                // random, non-congestive loss throughput collapses to
+                // ~MSS/(RTT*sqrt(p)) — a few hundred KB/s at 2% loss. BBR
+                // instead models bottleneck bandwidth and RTprop and ignores
+                // loss as a signal, so it stays near line rate on lossy links.
                 //
-                // Best-effort: fails harmlessly if the bbr module is not
-                // loaded or the option is not permitted, leaving the kernel
-                // default in place. The connection still works, just slower on
-                // lossy paths. Set on both the connector and acceptor sockets
-                // (both call this fn), since only the data sender's algorithm
-                // governs, and either end may be the sender.
-                let algo = b"bbr";
-                libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_TCP,
-                    libc::TCP_CONGESTION,
-                    algo.as_ptr() as *const libc::c_void,
-                    algo.len() as libc::socklen_t,
-                );
+                // We default to BBR: measured across netem regimes it matches
+                // CUBIC's clean-link median with far tighter tails and does
+                // not collapse on loss. Operators can override per-link via
+                // AFT_TCP_CC. `--fec` remains the answer for links so lossy
+                // that no reliable-transport algorithm can drain them.
+                //
+                // Best-effort: an unknown or unavailable algorithm leaves the
+                // kernel default in place; the connection still works. Applies
+                // to both connector and acceptor sockets (both call this fn),
+                // since only the data sender's algorithm governs and either end
+                // may be the sender.
+                let cc = tcp_congestion_control();
+                if !cc.is_empty() {
+                    libc::setsockopt(
+                        fd,
+                        libc::IPPROTO_TCP,
+                        libc::TCP_CONGESTION,
+                        cc.as_ptr() as *const libc::c_void,
+                        cc.len() as libc::socklen_t,
+                    );
+                }
             }
         }
     }
