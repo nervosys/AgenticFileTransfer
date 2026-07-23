@@ -48,8 +48,11 @@ recorded as a failure row, never silently dropped.
 - `results_fec.jsonl` — 50 MB single-file head-to-head including `aft --fec`.
 - `results_fec_final.jsonl` — `aft --fec` re-measured with the final binary
   (adaptive receiver patience + sample-driven BBR pacing with a startup guard,
-  per-interval delivery deltas, and loss-hint decay); these are the aft rows
-  quoted in the docs. good 3.2 s (6/6), bad 13.0 s (6/6), broken 103 s (3/3).
+  per-interval delivery deltas, and loss-hint decay); these are the aft --fec
+  rows quoted in the docs. good 3.2 s (6/6), bad 13.0 s (6/6), broken 103 s (3/3).
+- `results_tcp_bbr.jsonl` — `aft` TCP path (no `--fec`) once it requests BBR
+  congestion control per-socket; the `aft (TCP + BBR)` rows in the docs.
+  bad 14.8 s (3/3), broken timeout (3/3). Requires `modprobe tcp_bbr` on the host.
 
 These are the raw data behind the measured tables in
 [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).

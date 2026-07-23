@@ -11,11 +11,16 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
   streaming SHA-256, TLS/mTLS, HMAC-SHA256 challenge/response auth, and TCP_NODELAY
 - **Built-in file server** — `aft serve` exposes any directory over AFTP with optional
   TLS, authentication, and compression
+- **Loss-resilient TCP** — AFT requests **BBR** congestion control on its sockets
+  (`setsockopt(TCP_CONGESTION, "bbr")`, Linux, best-effort). BBR ignores random loss
+  as a congestion signal, so on a 2%-loss / 80 ms link the TCP path finishes a 50 MB
+  transfer in ~15 s where the default CUBIC collapses and times out
 - **Fountain-coded UDP data plane (`--fec`)** — RaptorQ symbols over UDP with a TCP
   control plane, HMAC-authenticated symbols, BBR-style pacing, and stage-verify-commit
-  integrity. Survives lossy/high-RTT links where TCP collapses: on a measured
-  50 Mbit / 80 ms / 2%-loss link it moved 50 MB in ~13 s median (6/6 runs) while every
-  TCP-based tool tested timed out ([measured head-to-head](docs/BENCHMARKS.md#measured-head-to-head-lossy-and-latent-links))
+  integrity. For links so lossy that reliable TCP cannot drain at all (10% loss +
+  reordering), it is the **only** transport tested that completes — 50 MB in ~103 s
+  median (3/3) where every reliable-transport tool, AFT's own BBR-TCP path included,
+  times out ([measured head-to-head](docs/BENCHMARKS.md#measured-head-to-head-lossy-and-latent-links))
 - **Quantum-resistant encryption** — NIST FIPS 203 ML-KEM (Kyber1024) key encapsulation
   with AES-256-GCM authenticated encryption for post-quantum file protection
 - **Neural network cipher** — Trainable MLP autoencoder encryption with OFB mode;
@@ -364,13 +369,18 @@ are HMAC-authenticated, blocks are staged and SHA-256-verified before commit,
 and delivery is BBR-paced. The flag is negotiated — against a server without
 FEC support the client silently uses the reliable TCP path.
 
-Measured on a netem-shaped link (50 Mbit, 80 ms RTT, 2% loss, 50 MB file),
-`aft --fec` completed in ~13 s median (6/6 runs) while plain TCP transfers
-(aft, rsync, and every other TCP tool tested) exceeded a 300 s timeout — TCP
-throughput collapses to ≈ MSS/(RTT·√loss) ≈ 130 KB/s under those conditions.
-Trade-off: peak RSS is ~150 MB (bounded, independent of file size) versus
-~10 MB for the TCP path. Full methodology, numbers, and caveats:
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+When to reach for `--fec` versus the (BBR-tuned) TCP path, measured on
+netem-shaped links, 50 MB file:
+
+- **2% loss / 80 ms RTT:** the TCP path with BBR already finishes in ~15 s at
+  ~47 MB RSS — you do not need FEC. (CUBIC-based tools time out here.)
+- **10% loss + reordering / 200 ms RTT:** reliable TCP cannot drain at all —
+  even BBR-TCP times out, because every lost byte still costs a retransmit.
+  `--fec` completes in ~103 s median (3/3), the only tool tested that finishes.
+  Trade-off: ~150 MB peak RSS (bounded, independent of file size) versus
+  ~47 MB for the TCP path.
+
+Full methodology, numbers, and caveats: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ### Server options
 
