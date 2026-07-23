@@ -258,10 +258,11 @@ release build), [ATP](https://github.com/Dicklesworthstone/atp) built from
 source (asupersync, TCP mode and RaptorQ mode with
 `--rq-allow-unauthenticated-lab`), and rsync over ssh. Workload: one 50 MB
 file, cold destination, byte-verified after transfer. Median of 3 runs; peak
-RSS via `/usr/bin/time -v`. Raw rows: [`bench/results_fec_final.jsonl`](../bench/results_fec_final.jsonl)
-(aft --fec), [`bench/results_tcp_bbr.jsonl`](../bench/results_tcp_bbr.jsonl)
-(aft TCP path), and [`bench/results_fec.jsonl`](../bench/results_fec.jsonl)
-(atp, rsync), produced by the harness in [`bench/harness/`](../bench/harness/).
+RSS via `/usr/bin/time -v`. Raw rows: [`bench/results_good_9run.jsonl`](../bench/results_good_9run.jsonl)
+(the 9-run `good` row, all tools), [`bench/results_fec_final.jsonl`](../bench/results_fec_final.jsonl)
+(aft --fec bad/broken), [`bench/results_tcp_bbr.jsonl`](../bench/results_tcp_bbr.jsonl)
+(aft TCP bad/broken), and [`bench/results_fec.jsonl`](../bench/results_fec.jsonl)
+(atp, rsync bad/broken), produced by the harness in [`bench/harness/`](../bench/harness/).
 
 Network regimes (mirroring ATP's own benchmark matrix):
 
@@ -276,35 +277,48 @@ within the cell's time limit):
 
 | Tool             | good      | bad         | broken       | RSS (good) |
 | ---------------- | --------- | ----------- | ------------ | ---------- |
-| **aft --fec**    | 3.2       | 13.0        | **103**      | ~152 MB    |
-| aft (TCP + BBR)  | 3.9       | **14.8**    | timeout      | ~55 MB     |
-| atp (TCP mode)   | **2.9**   | timeout     | timeout      | ~10 MB     |
-| atp (RaptorQ)    | 4.5       | timeout     | timeout      | ~13 MB     |
-| rsync (ssh)      | 3.2       | timeout     | timeout      | ~8 MB      |
+| **aft (TCP)**    | **2.8**   | 14.8        | timeout      | ~47 MB     |
+| **aft --fec**    | 3.4       | **13.0**    | **103**      | ~149 MB    |
+| atp (TCP mode)   | 3.0       | timeout     | timeout      | ~10 MB     |
+| atp (RaptorQ)    | 3.0       | timeout     | timeout      | ~13 MB     |
+| rsync (ssh)      | 3.3       | timeout     | timeout      | ~8 MB      |
+
+The `good` column is a median of 9 runs (that regime has high run-to-run
+variance on netem — see below); `bad`/`broken` are medians of 3–6 runs. The
+TCP path uses BBR congestion control by default (`AFT_TCP_CC` to override).
+
+**`good` regime — AFT's TCP path is the fastest tool measured, at 2.8 s.** It
+edges out atp (both modes, 3.0 s) and rsync (3.3 s), and it does so *tightly*:
+all nine AFT runs fell in 2.74–2.92 s. BBR's pacing keeps the distribution
+narrow — its slowest run still beat every other tool's median. The other tools
+are bimodal here: the 0.1% random loss occasionally triggers a CUBIC window cut
+(atp-tcp ranged to 14.6 s, rsync and atp-rq to ~29 s in earlier sweeps), so
+their medians sit higher and their tails are far worse. This is also why an
+earlier 3-run sample wrongly showed AFT behind — on a high-variance link, three
+runs is too few to trust; nine tells the real story.
 
 Two AFT paths, two different jobs:
 
-**`bad` regime (2% loss) — the TCP path handles it, once it stops using
-CUBIC.** AFT requests **BBR** congestion control on its sockets
-(`setsockopt(TCP_CONGESTION, "bbr")`, best-effort). CUBIC is loss-based: it
-reads the 2% random drop as congestion and cuts its window every time, so its
-throughput collapses to ≈ MSS/(RTT·√p) ≈ 130 KB/s — ~385 s for 50 MB, past
-every timeout here. That is why `atp (TCP mode)` and `rsync` (both on the
-kernel default) time out. BBR models bottleneck bandwidth and RTprop instead
-and ignores loss as a signal, so the same TCP transfer finishes in **14.8 s
-median** at ~47 MB RSS — matching the FEC path (13.0 s) with a third of the
-memory. On a 2%-loss link you do not need FEC; you need TCP to stop
-misreading loss.
+**`bad` regime (2% loss) — the TCP path handles it, thanks to BBR.** The same
+default BBR that wins the `good` cell also carries the lossy one. CUBIC (the
+kernel default every other tool here uses) is loss-based: it reads the 2%
+random drop as congestion and cuts its window every time, so its throughput
+collapses to ≈ MSS/(RTT·√p) ≈ 130 KB/s — ~385 s for 50 MB, past every timeout
+here, which is why `atp (TCP mode)` and `rsync` time out. BBR models bottleneck
+bandwidth and RTprop and ignores loss as a signal, so AFT's TCP transfer
+finishes in **14.8 s median** at ~47 MB RSS — matching the FEC path (13.0 s)
+with a third of the memory. On a 2%-loss link you do not need FEC; you need TCP
+to stop misreading loss.
 
 **`broken` regime (10% loss + reorder + dup) — only FEC completes.** Here BBR
 is not enough: congestion control was never the bottleneck, TCP's *reliability*
 layer is. Every dropped byte still costs a retransmit round trip, 5% reordering
 triggers spurious fast-retransmits, and at 10% loss over ~36k segments the
-stream never drains — `aft (TCP + BBR)` times out 3/3 at 200 s alongside every
-other reliable-transport tool. `aft --fec` completes 3/3 (89.7 / 103.2 /
-233.9 s, median 103.2 s) because a fountain code turns loss into a bit of extra
-repair bandwidth rather than a round trip. This is the regime the data plane
-was built for.
+stream never drains — `aft (TCP)` times out 3/3 at 200 s alongside every other
+reliable-transport tool. `aft --fec` completes 3/3 (89.7 / 103.2 / 233.9 s,
+median 103.2 s) because a fountain code turns loss into a bit of extra repair
+bandwidth rather than a round trip. This is the regime the data plane was built
+for.
 
 **Honest caveats — read before quoting these numbers:**
 
@@ -323,13 +337,14 @@ was built for.
    leaves little headroom; runs ranged 89.7–233.9 s and pure wire time for
    50 MB at 10 Mbit is ~42 s, so real room to improve remains — it just beats
    a field where nothing else finishes.
-4. **The `bad`-regime TCP result requires BBR to be available.** AFT requests
-   it per-socket, but the kernel only honours the request if the `tcp_bbr`
-   module is loaded (`modprobe tcp_bbr`; check
+4. **The TCP-path numbers assume BBR is available.** AFT requests BBR
+   per-socket by default (override with `AFT_TCP_CC`), but the kernel only
+   honours it if the `tcp_bbr` module is loaded (`modprobe tcp_bbr`; check
    `sysctl net.ipv4.tcp_available_congestion_control`). Where it is not, AFT
-   silently keeps the kernel default (CUBIC) and the TCP path collapses on
-   loss just like the other tools — use `--fec` there. BBR is a per-socket
-   opt-in on Linux only; on Windows/macOS the TCP path uses the OS default.
+   silently keeps the kernel default (CUBIC): the `good` cell is essentially
+   unchanged but its tail widens, and the `bad` cell collapses to a timeout
+   like the other tools — use `--fec` there. BBR is a per-socket opt-in on
+   Linux only; on Windows/macOS the TCP path uses the OS default.
 
 ---
 
