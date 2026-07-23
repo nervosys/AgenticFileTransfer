@@ -82,6 +82,33 @@ pub(crate) fn tune_tcp_socket(stream: &TcpStream) {
                     &one as *const _ as *const libc::c_void,
                     std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                 );
+
+                // Ask the kernel for BBR congestion control. The default
+                // (CUBIC) is loss-based: it reads every dropped segment as a
+                // congestion signal and multiplicatively cuts its window, so
+                // on a link with random, non-congestive loss its throughput
+                // collapses to ~MSS/(RTT*sqrt(p)) — a few hundred KB/s at 2%
+                // loss regardless of how much bandwidth is free. BBR instead
+                // models bottleneck bandwidth and round-trip propagation and
+                // paces to them, ignoring loss as a signal, so it stays near
+                // line rate on exactly the lossy/latent links where CUBIC
+                // falls apart. This is the same idea as the FEC data plane's
+                // pacer, one layer down for the reliable TCP path.
+                //
+                // Best-effort: fails harmlessly if the bbr module is not
+                // loaded or the option is not permitted, leaving the kernel
+                // default in place. The connection still works, just slower on
+                // lossy paths. Set on both the connector and acceptor sockets
+                // (both call this fn), since only the data sender's algorithm
+                // governs, and either end may be the sender.
+                let algo = b"bbr";
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_CONGESTION,
+                    algo.as_ptr() as *const libc::c_void,
+                    algo.len() as libc::socklen_t,
+                );
             }
         }
     }

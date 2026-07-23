@@ -1,0 +1,6 @@
+{"tool": "aft", "workload": "single_50m", "regime": "bad", "run": 1, "status": "ok", "seconds": 14.843842, "rss_kb": 47652, "bytes": 52428800, "note": ""}
+{"tool": "aft", "workload": "single_50m", "regime": "bad", "run": 2, "status": "ok", "seconds": 22.962964, "rss_kb": 47820, "bytes": 52428800, "note": ""}
+{"tool": "aft", "workload": "single_50m", "regime": "bad", "run": 3, "status": "ok", "seconds": 12.613369, "rss_kb": 47368, "bytes": 52428800, "note": ""}
+{"tool": "aft", "workload": "single_50m", "regime": "broken", "run": 1, "status": "timeout", "seconds": 200.004482, "rss_kb": null, "bytes": 26214400, "note": "exceeded 200s timeout"}
+{"tool": "aft", "workload": "single_50m", "regime": "broken", "run": 2, "status": "timeout", "seconds": 200.006247, "rss_kb": null, "bytes": 27262976, "note": "exceeded 200s timeout"}
+{"tool": "aft", "workload": "single_50m", "regime": "broken", "run": 3, "status": "timeout", "seconds": 200.008823, "rss_kb": null, "bytes": 23068672, "note": "exceeded 200s timeout"}
