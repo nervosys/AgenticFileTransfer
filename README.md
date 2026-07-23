@@ -673,6 +673,37 @@ pub trait ProtocolHandler: Send + Sync {
 - **Connection pooling** — reqwest's built-in pool for HTTP
 - **Release profile** — LTO, single codegen unit, stripped, panic=abort (~9 MB)
 
+### Measured Head-to-Head (Lossy Links)
+
+50 MB file, pushed across a `tc` netem–shaped link (both directions), median of
+3–6 runs, byte-verified. Contenders: AFT (this repo),
+[ATP](https://github.com/Dicklesworthstone/atp) in TCP and RaptorQ modes, and
+rsync over ssh. `timeout` = no run completed within the cell's limit.
+
+| Regime                              | aft `--fec`         | aft (TCP + BBR)   | atp (TCP) | atp (RaptorQ) | rsync (ssh) |
+| ----------------------------------- | ------------------- | ----------------- | --------- | ------------- | ----------- |
+| **good** (200 Mbit, 25 ms, 0.1%)    | 3.2 s               | 3.9 s             | **2.9 s** | 4.5 s         | 3.2 s       |
+| **bad** (50 Mbit, 80 ms, 2% loss)   | 13.0 s              | **14.8 s**        | timeout   | timeout       | timeout     |
+| **broken** (10 Mbit, 200 ms, 10% loss + reorder) | **103 s** | timeout           | timeout   | timeout       | timeout     |
+
+Two AFT paths, two jobs:
+
+- **Moderate loss (~2%)** — the plain TCP path handles it once it stops using
+  CUBIC. AFT requests **BBR** congestion control per-socket, which ignores
+  random loss as a congestion signal, so a transfer that collapses to a timeout
+  under CUBIC (the default every other tool here uses) finishes in ~15 s at
+  ~47 MB RSS.
+- **Severe loss (10% + reordering)** — reliable TCP cannot drain at all, even
+  with BBR: every lost byte still costs a retransmit round trip. Here `--fec`
+  is the **only** transport tested that completes, because a fountain code
+  turns loss into extra repair bandwidth instead of round trips. Cost: ~150 MB
+  peak RSS (bounded, independent of file size) versus ~47 MB for the TCP path.
+
+Every number is reproducible from the netem harness and raw result data in
+[`bench/`](bench/); full methodology, per-run figures, and caveats are in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md). (The `bad` TCP result requires the
+`tcp_bbr` kernel module; where BBR is unavailable, use `--fec`.)
+
 ## FIPS 140-3 Build
 
 For DoD and government environments requiring FIPS 140-3 validated cryptography, build with the `fips` feature flag to switch the TLS provider to [aws-lc-rs](https://github.com/aws/aws-lc-rs) (FIPS 140-3 validated):
