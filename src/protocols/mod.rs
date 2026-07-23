@@ -59,6 +59,11 @@ pub struct ProtocolOptions {
     pub pin_cert: Option<String>,
     /// Path to a custom CA certificate bundle (PEM file)
     pub ca_bundle: Option<String>,
+    /// Request the fountain-coded UDP data plane for AFTP transfers.
+    ///
+    /// Safe to leave on: it is negotiated, and a peer that does not support it
+    /// simply omits the capability and the transfer uses the reliable path.
+    pub fec: bool,
 }
 
 /// Trait defining the interface for all protocol handlers.
@@ -76,6 +81,42 @@ pub trait ProtocolHandler: Send + Sync {
 
     /// Whether this protocol supports byte-range requests for chunked parallel downloads
     fn supports_ranges(&self) -> bool;
+
+    /// Whether splitting a download across parallel range requests actually
+    /// makes it faster.
+    ///
+    /// Supporting ranges and *benefiting* from parallel ranges are different
+    /// questions. Parallel chunking wins for request/response protocols like
+    /// HTTP and S3, where each range rides a pooled connection and multiple
+    /// TCP flows claim more of the bottleneck.
+    ///
+    /// It loses badly for protocols that stream over one persistent
+    /// connection. AFTP opens a fresh connection and repeats the HELLO
+    /// handshake for every range, so N chunks cost N TCP handshakes, N
+    /// handshake round trips, and — most expensively — N cold starts of TCP
+    /// congestion control. On a 25 ms path that measured 4.2x *slower* than a
+    /// single streamed connection, with wild variance as short-lived flows in
+    /// slow-start collided.
+    ///
+    /// Defaults to true, matching the HTTP-family protocols this was built for.
+    fn benefits_from_parallel_ranges(&self) -> bool {
+        true
+    }
+
+    /// Whether writing to `a/b/c.txt` implicitly creates `a/b`.
+    ///
+    /// Object stores and AFTP create the whole path on write, so a directory
+    /// sync need not — and for AFTP *cannot* — issue explicit `mkdir` calls
+    /// first. Without this, syncing a tree to such a protocol fails on the
+    /// very first subdirectory even though every file would have transferred
+    /// fine.
+    ///
+    /// Note the limitation this implies: a protocol that only creates
+    /// directories as a side effect of writing files cannot represent an
+    /// *empty* directory, so empty directories are not replicated.
+    fn creates_parent_dirs_on_write(&self) -> bool {
+        false
+    }
 
     /// Whether this protocol supports resuming interrupted transfers
     fn supports_resume(&self) -> bool;

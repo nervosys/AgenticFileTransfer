@@ -1,0 +1,15 @@
+{"tool": "aft-fec", "workload": "single_50m", "regime": "good", "run": 1, "status": "ok", "seconds": 3.389402, "rss_kb": 160312, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "good", "run": 2, "status": "ok", "seconds": 3.352115, "rss_kb": 156400, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "good", "run": 3, "status": "ok", "seconds": 3.247907, "rss_kb": 158572, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "good", "run": 4, "status": "ok", "seconds": 3.241186, "rss_kb": 155904, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "good", "run": 5, "status": "ok", "seconds": 3.227274, "rss_kb": 150160, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "good", "run": 6, "status": "ok", "seconds": 3.183554, "rss_kb": 152008, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "bad", "run": 1, "status": "ok", "seconds": 11.402685, "rss_kb": 149504, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "bad", "run": 2, "status": "ok", "seconds": 14.626768, "rss_kb": 152504, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "bad", "run": 3, "status": "ok", "seconds": 25.93672, "rss_kb": 156356, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "bad", "run": 4, "status": "ok", "seconds": 11.122898, "rss_kb": 142776, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "bad", "run": 5, "status": "ok", "seconds": 11.227692, "rss_kb": 147608, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "bad", "run": 6, "status": "ok", "seconds": 14.669371, "rss_kb": 154088, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "broken", "run": 1, "status": "ok", "seconds": 89.745361, "rss_kb": 139396, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "broken", "run": 2, "status": "ok", "seconds": 233.933797, "rss_kb": 145620, "bytes": 52428800, "note": ""}
+{"tool": "aft-fec", "workload": "single_50m", "regime": "broken", "run": 3, "status": "ok", "seconds": 103.239155, "rss_kb": 139512, "bytes": 52428800, "note": ""}

@@ -33,7 +33,8 @@ fn make_client(url: &str, opts: &ProtocolOptions) -> AftResult<(AftpClient, Stri
         opts.bearer_token.clone(),
         use_tls,
         opts.insecure,
-    );
+    )
+    .with_fec(opts.fec);
     Ok((client, path))
 }
 
@@ -48,6 +49,21 @@ impl ProtocolHandler for AftpHandler {
     }
 
     fn supports_ranges(&self) -> bool {
+        true
+    }
+
+    /// AFTP streams a whole file over one connection, and every range request
+    /// costs a new connection plus a fresh HELLO handshake. Splitting a
+    /// download into parallel ranges therefore pays repeated TCP slow-start
+    /// for no gain — measurably slower than simply streaming.
+    fn benefits_from_parallel_ranges(&self) -> bool {
+        false
+    }
+
+    /// The AFTP server creates the full parent path when handling a PUT, so a
+    /// tree sync does not need explicit `mkdir` calls — which is just as well,
+    /// because the wire protocol has no MKDIR frame.
+    fn creates_parent_dirs_on_write(&self) -> bool {
         true
     }
 

@@ -94,6 +94,26 @@ pqc_kyber = { version = "0.7", features = ["kyber1024"] }
 # AES-256-GCM authenticated encryption
 aes-gcm = "0.10"
 
+# Hardware-accelerated CRC32 (SSE4.2 on x86_64, CRC32 on aarch64)
+crc32fast = "1.4"
+
+# Self-signed cert generation for QUIC dev mode
+rcgen = "0.13"
+
+# RaptorQ fountain coding (RFC 6330) for the AFTP FEC data plane
+raptorq = "2"
+
+# Optional: FIPS-validated crypto backend (replaces ring with aws-lc-rs)
+# Enable with: cargo build --features fips
+aws-lc-rs = { version = "1", optional = true }
+
+# NOTE: the three dependencies above are used unconditionally by src/aftp/
+# (CRC32 framing, QUIC dev certs, the FIPS backend). They must stay in the
+# top-level [dependencies] table. They previously sat below the
+# cfg(windows) header, which TOML scoped into that table and silently made
+# the whole crate Windows-only — it did not compile on Linux or macOS.
+# Anything added past this point belongs to a target-specific table.
+
 # Memory-mapped I/O for turbo transfers
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -106,15 +126,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_Networking_WinSock",
     "Win32_Security",
 ] }
-# Hardware-accelerated CRC32 (SSE4.2 on x86_64, CRC32 on aarch64)
-crc32fast = "1.4"
-
-# Self-signed cert generation for QUIC dev mode
-rcgen = "0.13"
-
-# Optional: FIPS-validated crypto backend (replaces ring with aws-lc-rs)
-# Enable with: cargo build --features fips
-aws-lc-rs = { version = "1", optional = true }
 
 [features]
 default = []

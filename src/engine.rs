@@ -107,8 +107,11 @@ pub async fn download(
     } else {
         (None, false)
     };
-    // Decide between parallel chunked download and single-stream
+    // Decide between parallel chunked download and single-stream. Ranges being
+    // *available* is not enough — for a protocol that streams over one
+    // persistent connection, splitting into ranges is a net loss.
     let use_chunks = supports_ranges
+        && handler.benefits_from_parallel_ranges()
         && config.parallel_chunks > 1
         && matches!(total_size, Some(t) if t > config.chunk_size * 2);
 

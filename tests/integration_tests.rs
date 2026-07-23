@@ -1740,6 +1740,364 @@ mod aftp_e2e_tests {
 
         handle.abort();
     }
+
+    // ── Fountain-coded data plane, end to end ───────────────────────────
+
+    /// Reproducible, incompressible-ish content so a corrupt or mis-ordered
+    /// reassembly is unmistakable.
+    fn fec_payload(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8)
+            .collect()
+    }
+
+    /// A full transfer over the real UDP data plane: handshake, offer/accept,
+    /// symbol spray, per-block feedback, and the closing digest.
+    ///
+    /// RaptorQ decoding is roughly two orders of magnitude slower unoptimized,
+    /// so this takes minutes in a debug build and ~0.3 s in release. Run it
+    /// where the timing is meaningful.
+    #[cfg_attr(debug_assertions, ignore = "too slow unoptimized; run with --release")]
+    #[tokio::test]
+    async fn fec_download_round_trips_over_udp() {
+        let dir = TempDir::new().unwrap();
+        // Above FEC_MIN_TRANSFER (1 MiB) so the data plane actually engages.
+        let content = fec_payload(3 * 1024 * 1024);
+        std::fs::write(dir.path().join("big.bin"), &content).unwrap();
+
+        let port = 12651;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let out = dir.path().join("out.bin");
+        let client = make_client(port).with_fec(true);
+        let n = client.download("/big.bin", &out, None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), content);
+
+        handle.abort();
+    }
+
+    /// Authenticated symbols: every datagram carries a per-session HMAC.
+    /// Release-only for the same reason as the test above.
+    #[cfg_attr(debug_assertions, ignore = "too slow unoptimized; run with --release")]
+    #[tokio::test]
+    async fn fec_download_with_authenticated_symbols() {
+        let dir = TempDir::new().unwrap();
+        let content = fec_payload(2 * 1024 * 1024);
+        std::fs::write(dir.path().join("auth.bin"), &content).unwrap();
+
+        let port = 12652;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            Some("fec_token".into()),
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let out = dir.path().join("auth-out.bin");
+        let client = AftpClient::new(
+            "127.0.0.1".into(),
+            port,
+            Some("fec_token".into()),
+            false,
+            false,
+        )
+        .with_fec(true);
+        let n = client.download("/auth.bin", &out, None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), content);
+
+        handle.abort();
+    }
+
+    /// A client that does not ask for the data plane must get the ordinary
+    /// reliable path, unchanged. This is the v1-client-against-v2-server case.
+    #[tokio::test]
+    async fn client_without_fec_uses_reliable_path() {
+        let dir = TempDir::new().unwrap();
+        let content = fec_payload(2 * 1024 * 1024);
+        std::fs::write(dir.path().join("plain.bin"), &content).unwrap();
+
+        let port = 12653;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let out = dir.path().join("plain-out.bin");
+        // Default client: CAP_FEC never advertised.
+        let client = make_client(port);
+        let n = client.download("/plain.bin", &out, None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), content);
+
+        handle.abort();
+    }
+
+    /// A server with the data plane disabled must not offer it, and a client
+    /// that asked for it must still succeed. This is the v2-client-against-
+    /// v1-server case.
+    #[tokio::test]
+    async fn fec_client_falls_back_to_v1_server() {
+        let dir = TempDir::new().unwrap();
+        let content = fec_payload(2 * 1024 * 1024);
+        std::fs::write(dir.path().join("fallback.bin"), &content).unwrap();
+
+        let port = 12654;
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        )
+        .with_fec(false);
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let out = dir.path().join("fallback-out.bin");
+        let client = make_client(port).with_fec(true);
+        let n = client.download("/fallback.bin", &out, None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), content);
+
+        handle.abort();
+    }
+
+    /// Files below the size floor stay on the reliable path even with the data
+    /// plane negotiated — the setup cost is not worth paying for them.
+    #[tokio::test]
+    async fn small_files_bypass_the_data_plane() {
+        let dir = TempDir::new().unwrap();
+        let content = b"tiny".to_vec();
+        std::fs::write(dir.path().join("tiny.txt"), &content).unwrap();
+
+        let port = 12655;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let out = dir.path().join("tiny-out.txt");
+        let client = make_client(port).with_fec(true);
+        let n = client.download("/tiny.txt", &out, None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), content);
+
+        handle.abort();
+    }
+
+    /// Pushing a file over the data plane: the client is the symbol sender,
+    /// the server decodes blocks straight to disk and commits on digest match.
+    /// Release-only — RaptorQ is ~100x slower unoptimized.
+    #[cfg_attr(debug_assertions, ignore = "too slow unoptimized; run with --release")]
+    #[tokio::test]
+    async fn fec_upload_round_trips_over_udp() {
+        let dir = TempDir::new().unwrap();
+        let served = dir.path().join("served");
+        std::fs::create_dir_all(&served).unwrap();
+
+        let content = fec_payload(3 * 1024 * 1024);
+        let src = dir.path().join("push.bin");
+        std::fs::write(&src, &content).unwrap();
+
+        let port = 12659;
+        let handle = start_server(&served, port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let client = make_client(port).with_fec(true);
+        let n = client.upload(&src, "/pushed.bin", None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(std::fs::read(served.join("pushed.bin")).unwrap(), content);
+        // Staging file must not be left behind.
+        assert!(!served.join("pushed.aft-tmp").exists());
+
+        handle.abort();
+    }
+
+    /// Authenticated push: symbols carry a per-session HMAC that both ends
+    /// derive from the shared token without it crossing the wire.
+    #[cfg_attr(debug_assertions, ignore = "too slow unoptimized; run with --release")]
+    #[tokio::test]
+    async fn fec_upload_with_authenticated_symbols() {
+        let dir = TempDir::new().unwrap();
+        let served = dir.path().join("served");
+        std::fs::create_dir_all(&served).unwrap();
+
+        let content = fec_payload(2 * 1024 * 1024);
+        let src = dir.path().join("push-auth.bin");
+        std::fs::write(&src, &content).unwrap();
+
+        let port = 12660;
+        let server = AftpServer::new(
+            &served,
+            port,
+            "127.0.0.1",
+            Some("push_token".into()),
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let client = AftpClient::new(
+            "127.0.0.1".into(),
+            port,
+            Some("push_token".into()),
+            false,
+            false,
+        )
+        .with_fec(true);
+        let n = client.upload(&src, "/auth-pushed.bin", None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(
+            std::fs::read(served.join("auth-pushed.bin")).unwrap(),
+            content
+        );
+
+        handle.abort();
+    }
+
+    /// A pushed file below the size floor stays on the reliable frame path.
+    #[tokio::test]
+    async fn small_upload_bypasses_the_data_plane() {
+        let dir = TempDir::new().unwrap();
+        let served = dir.path().join("served");
+        std::fs::create_dir_all(&served).unwrap();
+        let src = dir.path().join("small.txt");
+        std::fs::write(&src, b"small payload").unwrap();
+
+        let port = 12661;
+        let handle = start_server(&served, port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let client = make_client(port).with_fec(true);
+        let n = client.upload(&src, "/small.txt", None).await.unwrap();
+
+        assert_eq!(n, 13);
+        assert_eq!(
+            std::fs::read(served.join("small.txt")).unwrap(),
+            b"small payload"
+        );
+
+        handle.abort();
+    }
+
+    /// Syncing a directory tree to AFTP used to fail outright on the first
+    /// subdirectory with "mkdir is not supported by this protocol". The AFTP
+    /// server creates parent directories when handling a PUT, so the sync
+    /// engine must skip the explicit mkdir rather than attempt it.
+    #[tokio::test]
+    async fn sync_tree_to_aftp_server() {
+        use aft::sync::{CompareMode, SyncConfig};
+
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let dst_root = dir.path().join("served");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+
+        // Nested tree, several files per directory.
+        for i in 0..24 {
+            let sub = src.join(format!("d{}", i % 4)).join(format!("e{}", i % 2));
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join(format!("f{}.bin", i)), format!("contents-{}", i)).unwrap();
+        }
+
+        let port = 12657;
+        let handle = start_server(&dst_root, port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let src_handler = aft::protocols::resolve_protocol("file://").unwrap();
+        let dst_handler = aft::protocols::resolve_protocol("aftp://x/").unwrap();
+        let src_url = format!("file://{}", src.to_str().unwrap().replace('\\', "/"));
+        let dst_url = format!("aftp://127.0.0.1:{}/", port);
+
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            transfers: 8,
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &*src_handler,
+            &src_url,
+            &*dst_handler,
+            &dst_url,
+            &aft::protocols::ProtocolOptions::default(),
+            &config,
+            None,
+        )
+        .await
+        .expect("tree sync to AFTP should succeed");
+
+        assert_eq!(result.files_copied, 24, "every file should transfer");
+
+        // Every file must have landed at the right nested path with the right
+        // bytes — the server creating parents implicitly must not flatten it.
+        for i in 0..24 {
+            let landed = dst_root
+                .join(format!("d{}", i % 4))
+                .join(format!("e{}", i % 2))
+                .join(format!("f{}.bin", i));
+            assert_eq!(
+                std::fs::read_to_string(&landed).unwrap_or_default(),
+                format!("contents-{}", i),
+                "missing or wrong at {:?}",
+                landed
+            );
+        }
+
+        handle.abort();
+    }
+
+    /// Ranged reads must keep using the reliable path — the data plane only
+    /// serves whole files, and `download_range` backs parallel chunking.
+    #[tokio::test]
+    async fn ranged_reads_still_work_with_fec_negotiated() {
+        let dir = TempDir::new().unwrap();
+        let content = fec_payload(2 * 1024 * 1024);
+        std::fs::write(dir.path().join("ranged.bin"), &content).unwrap();
+
+        let port = 12656;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let client = make_client(port).with_fec(true);
+        let chunk = client.download_range("/ranged.bin", 1000, 1999).await.unwrap();
+
+        assert_eq!(chunk.len(), 1000);
+        assert_eq!(chunk, &content[1000..2000]);
+
+        handle.abort();
+    }
 }
 
 // ── Security-specific tests ─────────────────────────────────────────────────
@@ -1780,6 +2138,57 @@ mod security_tests {
 
         let result2 = client.head("/..\\..\\Windows\\System32\\config\\SAM").await;
         assert!(result2.is_err());
+
+        handle.abort();
+    }
+
+    /// `safe_path` was relaxed to permit uploads into directories that do not
+    /// exist yet, so that nested PUTs work. Containment must still hold: a
+    /// path that escapes the server root has to be refused whether or not any
+    /// part of it exists.
+    #[tokio::test]
+    async fn traversal_rejected_on_uploads_to_nonexistent_paths() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let payload = dir.path().join("payload.txt");
+        std::fs::write(&payload, "should not escape").unwrap();
+
+        let port = 12658;
+        let server = AftpServer::new(
+            &root, port, "127.0.0.1", None, false, false, false, None, None, 0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false);
+
+        // Escape attempts through directories that do not exist yet.
+        for target in [
+            "/../outside/escaped.txt",
+            "/a/b/../../../outside/escaped.txt",
+            "/newdir/../../outside/escaped.txt",
+        ] {
+            let r = client.upload(&payload, target, None).await;
+            assert!(r.is_err(), "traversal via {} was accepted", target);
+        }
+
+        // Nothing escaped.
+        assert!(
+            !outside.join("escaped.txt").exists(),
+            "a file was written outside the server root"
+        );
+
+        // The legitimate nested case still works — this is what the relaxation
+        // was for.
+        let ok = client.upload(&payload, "/fresh/nested/deep/file.txt", None).await;
+        assert!(ok.is_ok(), "nested upload should succeed: {:?}", ok.err());
+        assert!(root.join("fresh").join("nested").join("deep").join("file.txt").exists());
 
         handle.abort();
     }
@@ -3936,6 +4345,38 @@ mod protocol_handler_tests {
         let result = resolve_protocol("gopher://gopher.example.com/test");
         assert!(result.is_err());
     }
+
+    /// Supporting byte ranges and *benefiting* from parallel ranges are
+    /// different questions. AFTP supports ranges but opens a fresh connection
+    /// and repeats the handshake for each one, so parallel chunking pays
+    /// repeated TCP slow-start — measured at 4.2x slower than streaming on a
+    /// 25 ms path. It must opt out.
+    #[test]
+    fn aftp_supports_ranges_but_opts_out_of_parallel_chunking() {
+        for url in ["aftp://example.com/f", "aftps://example.com/f"] {
+            let h = resolve_protocol(url).unwrap();
+            assert!(h.supports_ranges(), "{} should support ranges", url);
+            assert!(
+                !h.benefits_from_parallel_ranges(),
+                "{} must not be split into parallel ranges",
+                url
+            );
+        }
+    }
+
+    /// The HTTP family pools connections, so parallel ranges are a genuine win
+    /// there and must stay enabled.
+    #[test]
+    fn http_family_keeps_parallel_chunking() {
+        for url in ["http://example.com/f", "https://example.com/f"] {
+            let h = resolve_protocol(url).unwrap();
+            assert!(
+                h.benefits_from_parallel_ranges(),
+                "{} should still use parallel ranges",
+                url
+            );
+        }
+    }
 }
 
 mod plugin_extended_tests {
@@ -4466,6 +4907,216 @@ mod sync_engine_tests {
         assert_eq!(result.files_copied, 1);
         assert!(dst.join("big.txt").exists());
         assert!(!dst.join("small.txt").exists());
+    }
+
+    // ── Concurrent execution ────────────────────────────────────────────
+
+    /// Build a nested tree of `count` files spread over subdirectories.
+    fn build_tree(root: &std::path::Path, count: usize) {
+        for i in 0..count {
+            let sub = root.join(format!("d{}", i % 7)).join(format!("e{}", i % 3));
+            fs::create_dir_all(&sub).unwrap();
+            fs::write(sub.join(format!("f{}.txt", i)), format!("payload-{}", i)).unwrap();
+        }
+    }
+
+    fn assert_tree_intact(root: &std::path::Path, count: usize) {
+        for i in 0..count {
+            let p = root
+                .join(format!("d{}", i % 7))
+                .join(format!("e{}", i % 3))
+                .join(format!("f{}.txt", i));
+            assert_eq!(
+                fs::read_to_string(&p).unwrap_or_default(),
+                format!("payload-{}", i),
+                "missing or corrupt file {:?}",
+                p
+            );
+        }
+    }
+
+    /// Concurrent execution must copy every file in a nested tree exactly once,
+    /// with contents intact — no interleaving corruption, no dropped files.
+    #[tokio::test]
+    async fn sync_concurrent_copies_whole_tree() {
+        const N: usize = 200;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        build_tree(&src, N);
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            transfers: 16,
+            ..SyncConfig::default()
+        };
+
+        let result = aft::sync::sync(
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.files_copied, N as u64);
+        assert_tree_intact(&dst, N);
+    }
+
+    /// Raising concurrency must not change the outcome: `transfers: 1`
+    /// (sequential, the old behavior) and `transfers: 16` agree on every count.
+    #[tokio::test]
+    async fn sync_concurrency_does_not_change_results() {
+        const N: usize = 60;
+
+        async fn run(transfers: usize) -> aft::sync::SyncResult {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("src");
+            let dst = dir.path().join("dst");
+            fs::create_dir_all(&src).unwrap();
+            fs::create_dir_all(&dst).unwrap();
+            build_tree(&src, N);
+            // Pre-existing identical file → must be skipped, not recopied.
+            let dup = dst.join("d0").join("e0");
+            fs::create_dir_all(&dup).unwrap();
+            fs::write(dup.join("f0.txt"), "payload-0").unwrap();
+
+            let handler = LocalHandler;
+            let config = SyncConfig {
+                compare: CompareMode::Size,
+                transfers,
+                ..SyncConfig::default()
+            };
+            let r = aft::sync::sync(
+                &handler,
+                &file_url(&src),
+                &handler,
+                &file_url(&dst),
+                &opts(),
+                &config,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_tree_intact(&dst, N);
+            r
+        }
+
+        let seq = run(1).await;
+        let conc = run(16).await;
+
+        assert_eq!(seq.files_copied, conc.files_copied);
+        assert_eq!(seq.files_skipped, conc.files_skipped);
+        assert_eq!(seq.dirs_created, conc.dirs_created);
+        assert_eq!(seq.bytes_transferred, conc.bytes_transferred);
+        assert_eq!(seq.files_skipped, 1, "the identical file should be skipped");
+    }
+
+    /// The executor partitions deletes into concurrent file deletes followed by
+    /// strictly ordered directory deletes. A parent directory must never be
+    /// removed before its children, however deep the nesting.
+    #[tokio::test]
+    async fn sync_delete_removes_deeply_nested_extraneous_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("keep.txt"), "keep").unwrap();
+
+        // Extraneous 4-level tree at the destination, with files at each level.
+        let deep = dst.join("a").join("b").join("c").join("d");
+        fs::create_dir_all(&deep).unwrap();
+        for (i, p) in [
+            dst.join("a"),
+            dst.join("a").join("b"),
+            dst.join("a").join("b").join("c"),
+            deep.clone(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            fs::write(p.join(format!("junk{}.txt", i)), "junk").unwrap();
+        }
+        fs::write(dst.join("keep.txt"), "keep").unwrap();
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            delete: true,
+            transfers: 8,
+            ..SyncConfig::default()
+        };
+
+        aft::sync::sync(
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(!dst.join("a").exists(), "extraneous tree should be gone");
+        assert!(dst.join("keep.txt").exists(), "matching file must survive");
+    }
+
+    /// `--preserve` now reads mtimes from the recursive listing rather than
+    /// issuing a per-file `head()`. Verify it still actually preserves them.
+    #[tokio::test]
+    async fn sync_preserve_timestamps_concurrent() {
+        const N: usize = 20;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        build_tree(&src, N);
+
+        let handler = LocalHandler;
+        let config = SyncConfig {
+            compare: CompareMode::Size,
+            preserve_timestamps: true,
+            transfers: 8,
+            ..SyncConfig::default()
+        };
+
+        aft::sync::sync(
+            &handler,
+            &file_url(&src),
+            &handler,
+            &file_url(&dst),
+            &opts(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
+
+        for i in 0..N {
+            let rel = std::path::Path::new(&format!("d{}", i % 7))
+                .join(format!("e{}", i % 3))
+                .join(format!("f{}.txt", i));
+            let s = fs::metadata(src.join(&rel)).unwrap().modified().unwrap();
+            let d = fs::metadata(dst.join(&rel)).unwrap().modified().unwrap();
+            let delta = s.duration_since(d).or_else(|_| d.duration_since(s)).unwrap();
+            assert!(
+                delta < std::time::Duration::from_secs(2),
+                "mtime not preserved for {:?}: {:?} vs {:?}",
+                rel,
+                s,
+                d
+            );
+        }
     }
 }
 

@@ -377,7 +377,8 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
             min_size,
             max_size,
             max_depth,
-        } => cmd_sync(cli, format, source, destination, compare, *dry_run, *delete, *update, *preserve, include, exclude, *min_size, *max_size, *max_depth).await,
+            transfers,
+        } => cmd_sync(cli, format, source, destination, compare, *dry_run, *delete, *update, *preserve, include, exclude, *min_size, *max_size, *max_depth, *transfers).await,
         Command::Move { source, destination } => cmd_mv(cli, source, destination).await,
         Command::Remove { url, recursive, force: _ } => cmd_rm(cli, url, *recursive).await,
         Command::Mkdir { url } => cmd_mkdir(cli, url).await,
@@ -404,6 +405,7 @@ fn build_opts(
         timeout_secs: cli.timeout,
         insecure: cli.insecure,
         max_redirects: max_redirects.unwrap_or(10),
+        fec: cli.fec,
         ..Default::default()
     };
 
@@ -695,6 +697,44 @@ async fn cmd_copy(
         return recursive_local_copy(source, destination, &config, format).await;
     }
 
+    // Recursive copy to a remote destination. Previously this fell through to
+    // the single-file path and failed with "neither a regular file", so
+    // `aft copy -r` simply did not work across protocols. Walking the tree and
+    // transferring each file concurrently is exactly what the sync engine
+    // does, minus the deletion of extraneous files.
+    if recursive {
+        let sync_config = sync::SyncConfig {
+            compare: sync::CompareMode::Size,
+            dry_run: _dry_run,
+            delete: false,
+            update: false,
+            preserve_timestamps: _preserve,
+            include: _include.to_vec(),
+            exclude: _exclude.to_vec(),
+            min_size: None,
+            max_size: None,
+            max_depth: 0,
+            transfers: sync::DEFAULT_TRANSFERS,
+            transfer: config.clone(),
+        };
+        let result = sync::sync(
+            &*src_handler,
+            source,
+            &*dst_handler,
+            destination,
+            &opts,
+            &sync_config,
+            None,
+        )
+        .await?;
+
+        let mut out = OutputResult::success("Copy");
+        out.source = Some(source.to_string());
+        out.destination = Some(destination.to_string());
+        out.extra = Some(serde_json::to_value(&result).unwrap_or_default());
+        return Ok(out);
+    }
+
     if src_handler.scheme() == "file" && dst_handler.scheme() == "file" {
         // Direct local-to-local copy
         let dest_path = {
@@ -888,6 +928,7 @@ async fn cmd_sync(
     min_size: Option<u64>,
     max_size: Option<u64>,
     max_depth: usize,
+    transfers: usize,
 ) -> AftResult<OutputResult> {
     let src_handler = protocols::resolve_protocol(source)?;
     let dst_handler = protocols::resolve_protocol(destination)?;
@@ -910,6 +951,7 @@ async fn cmd_sync(
         min_size,
         max_size,
         max_depth,
+        transfers,
         transfer: engine::TransferConfig {
             parallel_chunks: cli.parallel,
             max_retries: cli.retries,

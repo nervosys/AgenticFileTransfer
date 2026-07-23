@@ -46,7 +46,12 @@ const TARGET_SOCK_BUF: u32 = 16 * 1024 * 1024;
 
 /// Tune a TCP socket for high-throughput transfers by enlarging send/receive
 /// buffers and enabling low-latency options.
-fn tune_tcp_socket(stream: &TcpStream) {
+///
+/// Without this the kernel's default socket buffer (typically 64–256 KiB) caps
+/// the in-flight window, so a high bandwidth-delay-product link never fills:
+/// at 1 Gbit × 80 ms RTT the BDP is ~10 MiB, and a 256 KiB buffer would limit
+/// throughput to roughly 26 Mbit/s regardless of available bandwidth.
+pub(crate) fn tune_tcp_socket(stream: &TcpStream) {
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
