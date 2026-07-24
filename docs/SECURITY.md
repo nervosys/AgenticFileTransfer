@@ -229,11 +229,24 @@ deep packet inspection rules.
 (ring backend). HTTP transfers respect HTTPS. FTPS, SFTP, and QUIC encrypted
 channels are available. The turbo engine uses QUIC with `quinn`.
 
+**FEC data plane (v1.4):** When `--fec` is used, bulk file data leaves the TLS
+control stream and rides a UDP data plane. On an **authenticated** connection
+each symbol is encrypted and authenticated with **AES-256-GCM** under a
+per-session key (derived from the auth token and a random session id), so the
+data plane provides its own confidentiality and integrity — a passive on-path
+observer (T1040) recovers neither the file nor a usable oracle. On an
+**unauthenticated** connection there is no key and symbols carry only a CRC32
+(confidentiality/authenticity absent); this is a trusted-link/lab mode and must
+not carry CUI. See the dedicated FEC section below.
+
 **Gaps:**
 - No TLS requirement enforcement (server accepts plain TCP by default)
 - No minimum TLS version configuration
 - No cipher suite restriction
 - No mTLS (mutual TLS) for client certificate authentication
+- FEC symbol crypto uses the `aes-gcm`/`hmac` RustCrypto crates (as the PQC
+  pipeline does), **not** the FIPS-validated provider selected by
+  `--features fips`, which currently covers only the TLS layer
 
 **Recommendations:**
 - Add `--require-tls` server option to reject unencrypted connections
@@ -488,6 +501,70 @@ atomic temp-file-then-rename for PUT operations.
 - Implement secure deletion (overwrite before unlink) for temp files
 - Add crash handler to clean up temp files
 - Use unpredictable temp file names (random suffix)
+
+---
+
+## 4a. FEC Data Plane Security (v1.4)
+
+The `--fec` flag adds a fountain-coded UDP data plane alongside the existing TCP
+control plane. Because bulk file data then leaves the TLS-protected control
+stream, the data plane carries its own cryptography. This section documents its
+security properties; the code is in `src/aftp/fec/`.
+
+### Confidentiality & integrity
+
+| Property               | Authenticated connection (`--auth-token` / `aftps://`)                          | Unauthenticated connection            |
+| ---------------------- | ------------------------------------------------------------------------------- | ------------------------------------- |
+| Symbol confidentiality | **AES-256-GCM** per symbol                                                      | ❌ none (plaintext)                    |
+| Symbol authenticity    | **AES-256-GCM tag**, envelope header bound as AAD                               | ❌ CRC32 only (not a MAC)              |
+| Key                    | 32-byte key = HMAC-SHA256(token, "aft-fec-symbol-key-v2" ‖ session_id)          | none                                  |
+| Session id             | **cryptographically random** 64-bit, exchanged in the (TLS-protected) offer     | random                                |
+| Nonce                  | 96-bit random per datagram                                                      | n/a                                   |
+| Block commit           | SHA-256 over the whole object, verified before the file is materialized         | same                                  |
+
+The random per-session id makes the derived key unpredictable and unique, so a
+captured datagram cannot be replayed or decrypted into another session. The
+GCM tag with the header as AAD means any edit to the session id, block id,
+length, nonce, or ciphertext fails verification and the datagram is dropped
+before it reaches the decoder.
+
+### Unauthenticated mode is lab-only
+
+With no auth token there is no symbol key, so `--fec` falls back to a CRC32 that
+detects corruption but provides **neither confidentiality nor authenticity**. It
+is reachable only when the control plane itself is unauthenticated, and it must
+**never** carry CUI. For CMMC L2 / CUI, always run `--fec` with `--auth-token`
+(preferably over `aftps://`).
+
+### FIPS status
+
+The FEC symbol crypto uses the RustCrypto `aes-gcm` and `hmac`/`sha2` crates —
+the same primitives and boundary as the existing PQC/neural pipeline — **not**
+the FIPS-validated `aws-lc-rs` provider that `--features fips` selects for TLS.
+The algorithms (AES-256-GCM, HMAC-SHA256) are FIPS-*approved*, but this code
+path is outside the validated cryptographic module. A CMMC L2 deployment that
+requires validated crypto end-to-end should keep bulk data on the TLS control
+path (omit `--fec`) until the data-plane crypto is routed through `aws-lc-rs`.
+
+### Denial of service
+
+- **Amplification/reflection:** the sender pins the UDP peer to the control
+  connection's IP (`server.rs`, `client.rs`); only the port is peer-supplied, so
+  symbols cannot be reflected to a third party.
+- **Receiver memory:** downloads stream to a temp file (renamed into place only
+  after SHA-256 verification), and the receiver caps concurrent RaptorQ decoders
+  to the negotiated window — a malicious sender cannot exhaust memory by
+  declaring a huge size or spraying many distinct block ids.
+- **Forgery flood:** unverifiable datagrams are rejected before decode; a
+  connected UDP socket drops off-path packets at the kernel.
+
+### CMMC mapping (data plane)
+
+| Practice      | With authenticated `--fec`                                  |
+| ------------- | ----------------------------------------------------------- |
+| SC.L2-3.13.8  | ✅ AES-256-GCM encrypts CUI symbols in transit               |
+| SC.L2-3.13.11 | ⚠️ FIPS-approved algorithm, not via the validated module    |
+| SC.L2-3.13.16 | ✅ SHA-256 block commit protects integrity of CUI at rest    |
 
 ---
 

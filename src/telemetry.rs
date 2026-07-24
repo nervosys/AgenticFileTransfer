@@ -518,7 +518,7 @@ impl TelemetryStore {
         }
 
         // Sort by timestamp descending (newest first)
-        records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
 
         // Apply limit
         if let Some(lim) = limit {
