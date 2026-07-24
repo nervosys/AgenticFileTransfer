@@ -248,10 +248,10 @@ pub async fn probe_link(
         if let Some(size) = file_size {
             if size > 1 << 30 {
                 // > 1 GB: up to 16 streams
-                s.max(8).min(16)
+                s.clamp(8, 16)
             } else if size > 256 << 20 {
                 // > 256 MB: up to 12 streams
-                s.max(6).min(12)
+                s.clamp(6, 12)
             } else {
                 s
             }
@@ -281,7 +281,7 @@ pub async fn probe_link(
         url.starts_with("file://") || url.starts_with('/') || url.starts_with('.');
     let mode = if is_local_source && config.mmap {
         TransferMode::MmapDirect
-    } else if file_size.map_or(false, |s| s >= TURBO_THRESHOLD)
+    } else if file_size.is_some_and(|s| s >= TURBO_THRESHOLD)
         && handler.supports_ranges()
         && recommended_streams > 1
     {
@@ -314,6 +314,7 @@ pub async fn probe_link(
 /// [`turbo_local_copy_mmap`]. Making uploads genuinely zero-copy requires
 /// widening the handler trait to accept a borrowed buffer, which is tracked
 /// for the FEC data plane rather than bolted on here.
+#[allow(clippy::too_many_arguments)]
 pub async fn turbo_upload(
     handler: &dyn ProtocolHandler,
     source: &Path,
@@ -683,7 +684,7 @@ pub async fn turbo_download_auto(
         recommended_chunk: chunk,
         mode: if supports_ranges
             && parallel_helps
-            && total_size.map_or(false, |s| s >= TURBO_THRESHOLD)
+            && total_size.is_some_and(|s| s >= TURBO_THRESHOLD)
         {
             TransferMode::MultiStream
         } else {
@@ -706,6 +707,7 @@ pub async fn turbo_download_auto(
 }
 
 /// Top-level turbo upload dispatcher.
+#[allow(clippy::too_many_arguments)]
 pub async fn turbo_upload_auto(
     handler: &dyn ProtocolHandler,
     source: &Path,
@@ -804,7 +806,10 @@ mod tests {
         assert_eq!(lp.mode, TransferMode::Standard);
     }
 
+    // These guard the relationships between tuning constants; they read as
+    // runtime asserts but are compile-time truths, hence the allow.
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_constants_sane() {
         assert!(CHUNK_MIN < CHUNK_MAX);
         assert!(DEFAULT_STREAMS <= MAX_STREAMS);

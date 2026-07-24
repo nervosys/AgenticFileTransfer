@@ -17,11 +17,12 @@ AFT is designed from the ground up as an _agentic-first_ tool — every command 
   **fastest tool measured on a clean link** (2.8 s for 50 MB, tightest distribution) and
   still finishes a 2%-loss transfer in ~15 s where CUBIC-based tools collapse and time out
 - **Fountain-coded UDP data plane (`--fec`)** — RaptorQ symbols over UDP with a TCP
-  control plane, HMAC-authenticated symbols, BBR-style pacing, and stage-verify-commit
-  integrity. For links so lossy that reliable TCP cannot drain at all (10% loss +
-  reordering), it is the **only** transport tested that completes — 50 MB in ~103 s
-  median (3/3) where every reliable-transport tool, AFT's own BBR-TCP path included,
-  times out ([measured head-to-head](docs/BENCHMARKS.md#measured-head-to-head-lossy-and-latent-links))
+  control plane, **AES-256-GCM-encrypted** symbols (per-session random key, header bound in
+  as AAD), BBR-style pacing, and stage-verify-commit integrity. For links so lossy that
+  reliable TCP cannot drain at all (10% loss + reordering), it is the **only** transport
+  tested that completes — 50 MB in ~103 s median (3/3) where every reliable-transport tool,
+  AFT's own BBR-TCP path included, times out
+  ([measured head-to-head](docs/BENCHMARKS.md#measured-head-to-head-lossy-and-latent-links))
 - **Quantum-resistant encryption** — NIST FIPS 203 ML-KEM (Kyber1024) key encapsulation
   with AES-256-GCM authenticated encryption for post-quantum file protection
 - **Neural network cipher** — Trainable MLP autoencoder encryption with OFB mode;
@@ -365,10 +366,23 @@ aft put ./big.tar aftp://server:2600/big.tar --fec
 ```
 
 Packet loss then costs repair bandwidth instead of TCP round-trip stalls: any
-sufficiently large subset of symbols reconstructs each 8 MiB block. Symbols
-are HMAC-authenticated, blocks are staged and SHA-256-verified before commit,
-and delivery is BBR-paced. The flag is negotiated — against a server without
-FEC support the client silently uses the reliable TCP path.
+sufficiently large subset of symbols reconstructs each 8 MiB block. On an
+authenticated connection each symbol is **encrypted and authenticated with
+AES-256-GCM** under a per-session key derived from the auth token and a random
+session nonce (the envelope header is bound in as additional authenticated
+data), so the data plane carries its own confidentiality rather than shipping
+plaintext once the transfer leaves the TLS control stream. Blocks are staged
+and SHA-256-verified before commit, downloads stream to a temp file and are
+renamed into place only after verification, and delivery is BBR-paced. The flag
+is negotiated — against a server without FEC support the client silently uses
+the reliable TCP path.
+
+> **Confidentiality requires authentication.** Encryption is keyed off the
+> connection's auth token, so use `--auth-token` (or `aftps://`) for any
+> sensitive data. An *unauthenticated* server has no symbol key, so `--fec`
+> falls back to a CRC32 that gives neither confidentiality nor authenticity —
+> intended only for a physically trusted link, never for CUI. See
+> [docs/SECURITY.md](docs/SECURITY.md).
 
 When to reach for `--fec` versus the default (BBR) TCP path, measured on
 netem-shaped links, 50 MB file:

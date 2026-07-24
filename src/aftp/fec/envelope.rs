@@ -1,11 +1,28 @@
-//! Authenticated symbol envelope for the AFTP FEC data plane.
+//! Authenticated, encrypted symbol envelope for the AFTP FEC data plane.
 //!
-//! Every datagram on the data plane is one envelope: a fixed header, an
-//! integrity tag, and one serialized RaptorQ encoding packet. Datagrams are
-//! independent by construction — any envelope can be dropped, duplicated, or
+//! Every datagram on the data plane is one envelope: a fixed header, the
+//! cryptographic material, and one serialized RaptorQ encoding packet. Datagrams
+//! are independent by construction — any envelope can be dropped, duplicated, or
 //! reordered without affecting the others. That is the whole point of the
 //! fountain-coded data plane: the receiver needs *some* K(+ε) envelopes of a
 //! block, not any *particular* ones.
+//!
+//! ## Confidentiality and integrity
+//!
+//! When the connection is authenticated (a symbol key is derived from the
+//! control-plane auth token — see [`super::derive_symbol_key`]), the payload is
+//! sealed with **AES-256-GCM**. The fixed header is bound in as additional
+//! authenticated data (AAD), so the session id, block id, and length are
+//! authenticated even though they travel in the clear, and the RaptorQ symbol
+//! itself is *encrypted*. This matches the confidentiality the control plane
+//! gets from TLS: once FEC is negotiated, file bytes leave the TLS stream, so
+//! the data plane must carry its own encryption rather than shipping plaintext.
+//!
+//! Without a key the envelope carries a CRC32 instead. That detects corruption
+//! but provides neither authenticity nor confidentiality, so it is appropriate
+//! only on a physically trusted link (a lab, a private cross-connect) and must
+//! never carry sensitive/CUI data. It is reachable only when the control plane
+//! itself is unauthenticated.
 //!
 //! ## Wire format
 //!
@@ -16,58 +33,69 @@
 //! 3       1     flags
 //! 4       8     session_id  (u64 big-endian)
 //! 12      4     block_id    (u32 big-endian)
-//! 16      2     payload_len (u16 big-endian)
-//! 18      T     integrity tag: 16-byte truncated HMAC-SHA256 if FLAG_AUTH,
-//!               else 4-byte CRC32
-//! 18+T    N     payload — a serialized `raptorq::EncodingPacket`
+//! 16      2     payload_len (u16 big-endian) — plaintext length
+//!
+//! authenticated + encrypted (FLAG_AUTH | FLAG_ENCRYPTED):
+//! 18      12    AES-256-GCM nonce
+//! 30      N     ciphertext (payload_len bytes)
+//! 30+N    16    AES-256-GCM tag
+//!
+//! unauthenticated (no flags):
+//! 18      4     CRC32 of header[0..18] || payload
+//! 22      N     payload — a serialized `raptorq::EncodingPacket`
 //! ```
 //!
-//! The tag covers `header[0..18] || payload`, so the block id and length are
-//! authenticated along with the symbol. A receiver that cannot verify the tag
-//! discards the datagram before it reaches the decoder, which keeps forged or
-//! corrupt symbols out of the Gaussian elimination entirely.
+//! GCM authenticates the nonce, the ciphertext, and the AAD (the 18-byte
+//! header prefix). Tampering with any of them — including swapping the nonce or
+//! editing the block id — fails the tag check, so forged or corrupt symbols are
+//! discarded before they ever reach the decoder.
 //!
 //! ## Why the header is small
 //!
 //! Header overhead is paid on *every* datagram, so it directly reduces goodput.
-//! At 34 bytes authenticated (22 unauthenticated) an envelope leaves 1362 bytes
-//! of symbol in a 1400-byte datagram — 97.3% efficiency.
+//! At 46 bytes encrypted (22 unauthenticated) an envelope leaves 1350 bytes of
+//! symbol in a 1400-byte datagram — 96.4% efficiency.
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Nonce};
+use rand::RngCore;
 
 use crate::error::{AftError, AftResult};
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// Envelope magic — distinct from the control plane's `0xAF 0x54` so a
 /// datagram that lands on the wrong socket is rejected immediately.
 pub const ENVELOPE_MAGIC: [u8; 2] = [0xAF, 0xFE];
 
-/// Data-plane wire version.
-pub const ENVELOPE_VERSION: u8 = 1;
+/// Data-plane wire version. v2 replaced the v1 HMAC-over-plaintext scheme with
+/// AES-256-GCM, so the payload is encrypted rather than merely authenticated.
+pub const ENVELOPE_VERSION: u8 = 2;
 
-/// Fixed portion of the header, before the integrity tag.
+/// Fixed portion of the header, before any crypto material.
 pub const HEADER_PREFIX_LEN: usize = 18;
 
-/// Length of the truncated HMAC-SHA256 tag.
-pub const AUTH_TAG_LEN: usize = 16;
+/// AES-256-GCM nonce length.
+pub const NONCE_LEN: usize = 12;
+
+/// AES-256-GCM authentication tag length (trails the ciphertext).
+pub const GCM_TAG_LEN: usize = 16;
 
 /// Length of the CRC32 tag used when authentication is disabled.
 pub const CRC_TAG_LEN: usize = 4;
 
-/// Total header length for an authenticated envelope.
-pub const HEADER_LEN_AUTH: usize = HEADER_PREFIX_LEN + AUTH_TAG_LEN;
+/// Non-payload bytes in an authenticated (encrypted) envelope: prefix + nonce +
+/// trailing GCM tag.
+pub const AUTH_OVERHEAD: usize = HEADER_PREFIX_LEN + NONCE_LEN + GCM_TAG_LEN;
 
-/// Total header length for an unauthenticated envelope.
+/// Non-payload bytes in an unauthenticated envelope: prefix + CRC32.
 pub const HEADER_LEN_PLAIN: usize = HEADER_PREFIX_LEN + CRC_TAG_LEN;
 
-/// Symbols carry a truncated HMAC-SHA256 tag rather than a CRC32.
+/// Offset at which the ciphertext begins in an authenticated envelope.
+const ENC_HEADER_LEN: usize = HEADER_PREFIX_LEN + NONCE_LEN;
+
+/// Symbols carry cryptographic authentication (a key is configured).
 pub const FLAG_AUTH: u8 = 0x01;
 
-/// Reserved: payload is AES-256-GCM sealed. Not yet implemented; parsing an
-/// envelope with this bit set is refused so a future sender cannot be
-/// misinterpreted as plaintext by an older receiver.
+/// Payload is AES-256-GCM sealed. Always set together with `FLAG_AUTH`.
 pub const FLAG_ENCRYPTED: u8 = 0x02;
 
 /// Default path MTU for the raw UDP data plane.
@@ -75,25 +103,26 @@ pub const DEFAULT_MTU: u16 = 1400;
 
 /// Bytes of RaptorQ payload that fit in `mtu` given the envelope overhead.
 ///
-/// Accounts for both the envelope header and RaptorQ's own 4-byte `PayloadId`
+/// Accounts for both the envelope overhead and RaptorQ's own 4-byte `PayloadId`
 /// that prefixes each serialized packet.
 pub fn max_symbol_size(mtu: u16, authenticated: bool) -> u16 {
-    let header = if authenticated {
-        HEADER_LEN_AUTH
+    let overhead = if authenticated {
+        AUTH_OVERHEAD
     } else {
         HEADER_LEN_PLAIN
     };
     // 4 bytes of raptorq PayloadId ride inside the payload.
-    mtu.saturating_sub(header as u16).saturating_sub(4)
+    mtu.saturating_sub(overhead as u16).saturating_sub(4)
 }
 
-/// A parsed data-plane datagram.
+/// A parsed data-plane datagram. `payload` is always plaintext: on an encrypted
+/// envelope it is the result of a successful decrypt-and-verify.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
     pub session_id: u64,
     pub block_id: u32,
     pub flags: u8,
-    /// Serialized `raptorq::EncodingPacket`.
+    /// Serialized `raptorq::EncodingPacket` (plaintext).
     pub payload: Vec<u8>,
 }
 
@@ -107,10 +136,21 @@ impl Envelope {
         }
     }
 
-    /// Serialize, authenticating with `key` when one is supplied.
+    fn write_prefix(&self, flags: u8, out: &mut Vec<u8>) {
+        out.extend_from_slice(&ENVELOPE_MAGIC);
+        out.push(ENVELOPE_VERSION);
+        out.push(flags);
+        out.extend_from_slice(&self.session_id.to_be_bytes());
+        out.extend_from_slice(&self.block_id.to_be_bytes());
+        out.extend_from_slice(&(self.payload.len() as u16).to_be_bytes());
+        debug_assert_eq!(out.len(), HEADER_PREFIX_LEN);
+    }
+
+    /// Serialize, sealing the payload with AES-256-GCM when `key` is supplied.
     ///
     /// With no key the envelope carries a CRC32 instead, which detects
-    /// corruption but not forgery — appropriate only for trusted links.
+    /// corruption but neither forgery nor disclosure — appropriate only for a
+    /// trusted link that never carries sensitive data.
     pub fn encode(&self, key: Option<&[u8]>) -> AftResult<Vec<u8>> {
         if self.payload.len() > u16::MAX as usize {
             return Err(AftError::Other(format!(
@@ -120,41 +160,47 @@ impl Envelope {
             )));
         }
 
-        let authenticated = key.is_some();
-        let tag_len = if authenticated {
-            AUTH_TAG_LEN
-        } else {
-            CRC_TAG_LEN
-        };
-        let mut out = Vec::with_capacity(HEADER_PREFIX_LEN + tag_len + self.payload.len());
-
-        out.extend_from_slice(&ENVELOPE_MAGIC);
-        out.push(ENVELOPE_VERSION);
-        out.push(if authenticated {
-            self.flags | FLAG_AUTH
-        } else {
-            self.flags & !FLAG_AUTH
-        });
-        out.extend_from_slice(&self.session_id.to_be_bytes());
-        out.extend_from_slice(&self.block_id.to_be_bytes());
-        out.extend_from_slice(&(self.payload.len() as u16).to_be_bytes());
-        debug_assert_eq!(out.len(), HEADER_PREFIX_LEN);
-
         match key {
             Some(k) => {
-                let tag = compute_tag(k, &out, &self.payload)?;
-                out.extend_from_slice(&tag);
+                let flags = self.flags | FLAG_AUTH | FLAG_ENCRYPTED;
+                let mut out =
+                    Vec::with_capacity(AUTH_OVERHEAD + self.payload.len());
+                self.write_prefix(flags, &mut out);
+
+                let mut nonce_bytes = [0u8; NONCE_LEN];
+                rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+                out.extend_from_slice(&nonce_bytes);
+
+                let cipher = Aes256Gcm::new_from_slice(k)
+                    .map_err(|e| AftError::Other(format!("FEC cipher key: {}", e)))?;
+                // AAD = the 18-byte prefix, so the header is authenticated even
+                // though it is not encrypted. `out` currently holds
+                // prefix || nonce; the prefix is its first HEADER_PREFIX_LEN
+                // bytes.
+                let aad = out[..HEADER_PREFIX_LEN].to_vec();
+                let sealed = cipher
+                    .encrypt(
+                        Nonce::from_slice(&nonce_bytes),
+                        Payload {
+                            msg: &self.payload,
+                            aad: &aad,
+                        },
+                    )
+                    .map_err(|_| AftError::Other("FEC symbol encryption failed".to_string()))?;
+                out.extend_from_slice(&sealed);
+                Ok(out)
             }
             None => {
+                let mut out = Vec::with_capacity(HEADER_LEN_PLAIN + self.payload.len());
+                self.write_prefix(self.flags & !(FLAG_AUTH | FLAG_ENCRYPTED), &mut out);
                 let mut h = crc32fast::Hasher::new();
                 h.update(&out);
                 h.update(&self.payload);
                 out.extend_from_slice(&h.finalize().to_be_bytes());
+                out.extend_from_slice(&self.payload);
+                Ok(out)
             }
         }
-
-        out.extend_from_slice(&self.payload);
-        Ok(out)
     }
 
     /// Parse and verify a datagram.
@@ -163,7 +209,7 @@ impl Envelope {
     /// version is wrong, or whose declared length disagrees with the received
     /// bytes is rejected rather than partially accepted. `key` must be supplied
     /// iff the sender authenticated; a mismatch is an error, so an attacker
-    /// cannot strip authentication by clearing the flag.
+    /// cannot strip authentication (and encryption) by clearing the flags.
     pub fn decode(buf: &[u8], key: Option<&[u8]>) -> AftResult<Self> {
         if buf.len() < HEADER_PREFIX_LEN {
             return Err(AftError::Other(format!(
@@ -182,94 +228,96 @@ impl Envelope {
         }
 
         let flags = buf[3];
-        if flags & FLAG_ENCRYPTED != 0 {
-            return Err(AftError::Other(
-                "FEC envelope is encrypted; this build cannot decrypt it".to_string(),
-            ));
-        }
+        let encrypted = flags & FLAG_ENCRYPTED != 0;
+        let authed = flags & FLAG_AUTH != 0;
 
-        let authenticated = flags & FLAG_AUTH != 0;
-        // Refuse a downgrade: if we hold a key we require authentication, and
-        // if we hold none we cannot verify one.
-        if authenticated != key.is_some() {
-            return Err(AftError::Other(if authenticated {
-                "FEC datagram is authenticated but no key is configured".to_string()
-            } else {
-                "FEC datagram is unauthenticated but a key is configured".to_string()
-            }));
-        }
-
-        let tag_len = if authenticated {
-            AUTH_TAG_LEN
-        } else {
-            CRC_TAG_LEN
-        };
-        let header_len = HEADER_PREFIX_LEN + tag_len;
-        if buf.len() < header_len {
-            return Err(AftError::Other(format!(
-                "FEC datagram truncated: {} bytes, need {}",
-                buf.len(),
-                header_len
-            )));
+        // Refuse a downgrade: holding a key requires an authenticated+encrypted
+        // datagram; holding none requires a plain one. Either mismatch is fatal,
+        // so an attacker can neither strip encryption nor smuggle in a datagram
+        // we cannot decrypt.
+        match (key.is_some(), authed && encrypted) {
+            (true, true) => {}
+            (false, false) if !authed && !encrypted => {}
+            (true, _) => {
+                return Err(AftError::Other(
+                    "FEC datagram is not authenticated/encrypted but a key is configured"
+                        .to_string(),
+                ))
+            }
+            (false, _) => {
+                return Err(AftError::Other(
+                    "FEC datagram is authenticated but no key is configured".to_string(),
+                ))
+            }
         }
 
         let session_id = u64::from_be_bytes(buf[4..12].try_into().unwrap());
         let block_id = u32::from_be_bytes(buf[12..16].try_into().unwrap());
         let payload_len = u16::from_be_bytes(buf[16..18].try_into().unwrap()) as usize;
 
-        if buf.len() != header_len + payload_len {
-            return Err(AftError::Other(format!(
-                "FEC length mismatch: declared {}, received {}",
-                payload_len,
-                buf.len().saturating_sub(header_len)
-            )));
-        }
-
-        let prefix = &buf[0..HEADER_PREFIX_LEN];
-        let tag = &buf[HEADER_PREFIX_LEN..header_len];
-        let payload = &buf[header_len..];
-
         match key {
             Some(k) => {
-                let expected = compute_tag(k, prefix, payload)?;
-                // `Hmac::verify` is constant-time; compare via it rather than
-                // slice equality so tag verification cannot leak timing.
-                let mut mac = HmacSha256::new_from_slice(k)
-                    .map_err(|e| AftError::Other(format!("FEC hmac key: {}", e)))?;
-                mac.update(prefix);
-                mac.update(payload);
-                mac.verify_truncated_left(tag)
-                    .map_err(|_| AftError::Other("FEC symbol authentication failed".to_string()))?;
-                debug_assert_eq!(&expected[..], tag);
+                let expected = ENC_HEADER_LEN + payload_len + GCM_TAG_LEN;
+                if buf.len() != expected {
+                    return Err(AftError::Other(format!(
+                        "FEC length mismatch: declared {}, envelope {} bytes",
+                        payload_len,
+                        buf.len()
+                    )));
+                }
+                let prefix = &buf[0..HEADER_PREFIX_LEN];
+                let nonce = &buf[HEADER_PREFIX_LEN..ENC_HEADER_LEN];
+                let sealed = &buf[ENC_HEADER_LEN..]; // ciphertext || tag
+
+                let cipher = Aes256Gcm::new_from_slice(k)
+                    .map_err(|e| AftError::Other(format!("FEC cipher key: {}", e)))?;
+                let payload = cipher
+                    .decrypt(
+                        Nonce::from_slice(nonce),
+                        Payload {
+                            msg: sealed,
+                            aad: prefix,
+                        },
+                    )
+                    .map_err(|_| {
+                        AftError::Other("FEC symbol authentication failed".to_string())
+                    })?;
+
+                Ok(Self {
+                    session_id,
+                    block_id,
+                    flags,
+                    payload,
+                })
             }
             None => {
+                let header_len = HEADER_LEN_PLAIN;
+                if buf.len() != header_len + payload_len {
+                    return Err(AftError::Other(format!(
+                        "FEC length mismatch: declared {}, received {}",
+                        payload_len,
+                        buf.len().saturating_sub(header_len)
+                    )));
+                }
+                let prefix = &buf[0..HEADER_PREFIX_LEN];
+                let tag = &buf[HEADER_PREFIX_LEN..header_len];
+                let payload = &buf[header_len..];
+
                 let mut h = crc32fast::Hasher::new();
                 h.update(prefix);
                 h.update(payload);
                 if h.finalize().to_be_bytes() != tag {
                     return Err(AftError::Other("FEC symbol CRC32 mismatch".to_string()));
                 }
+                Ok(Self {
+                    session_id,
+                    block_id,
+                    flags,
+                    payload: payload.to_vec(),
+                })
             }
         }
-
-        Ok(Self {
-            session_id,
-            block_id,
-            flags,
-            payload: payload.to_vec(),
-        })
     }
-}
-
-fn compute_tag(key: &[u8], prefix: &[u8], payload: &[u8]) -> AftResult<[u8; AUTH_TAG_LEN]> {
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|e| AftError::Other(format!("FEC hmac key: {}", e)))?;
-    mac.update(prefix);
-    mac.update(payload);
-    let full = mac.finalize().into_bytes();
-    let mut tag = [0u8; AUTH_TAG_LEN];
-    tag.copy_from_slice(&full[..AUTH_TAG_LEN]);
-    Ok(tag)
 }
 
 #[cfg(test)]
@@ -291,6 +339,7 @@ mod tests {
         assert_eq!(back.block_id, e.block_id);
         assert_eq!(back.payload, e.payload);
         assert!(back.flags & FLAG_AUTH != 0);
+        assert!(back.flags & FLAG_ENCRYPTED != 0);
     }
 
     #[test]
@@ -302,12 +351,38 @@ mod tests {
         assert_eq!(back.payload, e.payload);
     }
 
+    /// The plaintext symbol must not appear anywhere on the wire when a key is
+    /// used — this is the property the whole C1 fix exists to provide.
     #[test]
-    fn authenticated_header_is_34_bytes() {
+    fn payload_is_encrypted_on_the_wire() {
         let e = env();
         let wire = e.encode(Some(KEY)).unwrap();
-        assert_eq!(HEADER_LEN_AUTH, 34);
-        assert_eq!(wire.len(), 34 + e.payload.len());
+        assert!(
+            !wire.windows(e.payload.len()).any(|w| w == e.payload.as_slice()),
+            "plaintext payload leaked into the ciphertext envelope"
+        );
+    }
+
+    /// A fresh nonce per encode means two encodings of the same symbol differ.
+    #[test]
+    fn each_encode_uses_a_fresh_nonce() {
+        let e = env();
+        let a = e.encode(Some(KEY)).unwrap();
+        let b = e.encode(Some(KEY)).unwrap();
+        assert_ne!(a, b, "nonce (and thus ciphertext) must vary per datagram");
+        // But both still decrypt to the same plaintext.
+        assert_eq!(
+            Envelope::decode(&a, Some(KEY)).unwrap().payload,
+            Envelope::decode(&b, Some(KEY)).unwrap().payload
+        );
+    }
+
+    #[test]
+    fn authenticated_overhead_is_46_bytes() {
+        let e = env();
+        let wire = e.encode(Some(KEY)).unwrap();
+        assert_eq!(AUTH_OVERHEAD, 46);
+        assert_eq!(wire.len(), 46 + e.payload.len());
     }
 
     #[test]
@@ -346,8 +421,8 @@ mod tests {
         }
     }
 
-    /// An attacker must not be able to strip authentication by clearing the
-    /// flag and swapping in a CRC32.
+    /// An attacker must not be able to strip authentication/encryption by
+    /// clearing the flags and swapping in a CRC32.
     #[test]
     fn auth_downgrade_is_refused() {
         let plain = env().encode(None).unwrap();
@@ -387,19 +462,19 @@ mod tests {
         assert!(Envelope::decode(&wire, Some(KEY)).is_err());
     }
 
+    /// Swapping the nonce for another valid-length one must fail the tag check,
+    /// not silently decrypt to garbage.
     #[test]
-    fn encrypted_flag_is_refused_not_ignored() {
-        let mut e = env();
-        e.flags = FLAG_ENCRYPTED;
-        let wire = e.encode(Some(KEY)).unwrap();
-        let err = Envelope::decode(&wire, Some(KEY)).unwrap_err();
-        assert!(err.to_string().contains("encrypted"));
+    fn nonce_tampering_is_rejected() {
+        let mut wire = env().encode(Some(KEY)).unwrap();
+        wire[HEADER_PREFIX_LEN] ^= 0xFF;
+        assert!(Envelope::decode(&wire, Some(KEY)).is_err());
     }
 
     #[test]
     fn symbol_sizing_fits_the_mtu() {
         let s = max_symbol_size(1400, true);
-        assert_eq!(s, 1400 - 34 - 4);
+        assert_eq!(s, 1400 - 46 - 4);
         // A full-size symbol plus its PayloadId must not exceed the MTU.
         let payload = vec![0u8; s as usize + 4];
         let wire = Envelope::new(1, 0, payload).encode(Some(KEY)).unwrap();
@@ -412,6 +487,9 @@ mod tests {
     fn empty_payload_round_trips() {
         let e = Envelope::new(1, 0, Vec::new());
         let wire = e.encode(Some(KEY)).unwrap();
-        assert_eq!(Envelope::decode(&wire, Some(KEY)).unwrap().payload, Vec::<u8>::new());
+        assert_eq!(
+            Envelope::decode(&wire, Some(KEY)).unwrap().payload,
+            Vec::<u8>::new()
+        );
     }
 }

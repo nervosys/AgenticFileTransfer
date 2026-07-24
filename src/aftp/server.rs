@@ -1079,13 +1079,11 @@ where
     use super::fec::transfer::{send_blocks, FecParams, Feedback, FileBlocks, DEFAULT_WINDOW};
     use super::fec::udp::DataPlane;
 
-    // A stable numeric id for this transfer, derived from the session string.
-    let numeric_session = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        session_id.hash(&mut h);
-        h.finish()
-    };
+    // A random numeric id for this transfer, sent to the client in the offer
+    // below. It seeds the per-session symbol key, so it must be unpredictable
+    // rather than derived from any public or low-entropy value.
+    let _ = session_id;
+    let numeric_session = super::fec::random_session_id();
 
     let key = super::fec::derive_symbol_key(state.auth_token.as_deref(), numeric_session);
     let authenticated = key.is_some();

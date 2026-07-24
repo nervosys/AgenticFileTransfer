@@ -46,21 +46,43 @@ pub use pacing::{repair_symbol_count, Pacer, Phase};
 /// small files stay on the reliable frame path where they are already fast.
 pub const FEC_MIN_TRANSFER: u64 = 1 << 20; // 1 MiB
 
-/// Derive the per-session symbol authentication key from the connection's
-/// auth token.
+/// Derive the per-session AES-256-GCM symbol key from the connection's auth
+/// token.
 ///
-/// Binding the key to `session_id` means symbols from one session can never
-/// verify against another, so a captured datagram cannot be replayed into a
-/// later transfer. Returns `None` when the connection is unauthenticated, in
-/// which case symbols carry a CRC32 only — that detects corruption but not
-/// forgery, and is appropriate only on a trusted link.
+/// The 32-byte output is the key the data plane uses to *encrypt and*
+/// authenticate every symbol (see [`envelope`]). Binding it to `session_id`
+/// means symbols from one session can never decrypt or verify against another,
+/// so a captured datagram cannot be replayed into a later transfer — provided
+/// `session_id` is unpredictable and unique per session, which is why both ends
+/// now exchange a random nonce on the control plane rather than deriving it
+/// from public transfer parameters.
+///
+/// Returns `None` when the connection is unauthenticated, in which case symbols
+/// carry a CRC32 only — that detects corruption but provides neither
+/// authenticity nor confidentiality, and is appropriate only on a trusted link
+/// that never carries sensitive data.
+///
+/// FIPS note: this uses the RustCrypto `hmac`/`sha2` KDF and the `aes-gcm`
+/// cipher, the same primitives as the PQC pipeline — not the FIPS-validated TLS
+/// provider selected by `--features fips`. See `docs/SECURITY.md`.
 pub fn derive_symbol_key(auth_token: Option<&str>, session_id: u64) -> Option<Vec<u8>> {
     use hmac::{Hmac, Mac};
     let token = auth_token?;
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(token.as_bytes()).ok()?;
-    mac.update(b"aft-fec-symbol-key-v1");
+    mac.update(b"aft-fec-symbol-key-v2");
     mac.update(&session_id.to_be_bytes());
     Some(mac.finalize().into_bytes().to_vec())
+}
+
+/// A cryptographically random 64-bit session id for the FEC data plane.
+///
+/// This is exchanged on the (TLS-protected, when `aftps://`) control plane in
+/// the FEC offer, so both ends agree on it without deriving it from public
+/// values. Using a random id — rather than `hash(host, port, file_size)` —
+/// makes the per-session symbol key unpredictable and unique, which is what
+/// actually gives the replay resistance the data plane relies on.
+pub fn random_session_id() -> u64 {
+    rand::RngCore::next_u64(&mut rand::rngs::OsRng)
 }
 
 #[cfg(test)]

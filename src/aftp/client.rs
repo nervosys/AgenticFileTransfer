@@ -617,16 +617,13 @@ impl AftpClient {
         use super::fec::transfer::{send_blocks, FecParams, Feedback, FileBlocks, DEFAULT_WINDOW};
         use super::fec::udp::DataPlane;
 
-        // A session id the server can match; derived from the connection so
-        // both ends agree without another round trip.
-        let session_id: u64 = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            self.host.hash(&mut h);
-            self.port.hash(&mut h);
-            file_size.hash(&mut h);
-            h.finish()
-        };
+        // A random session id, sent to the server in the offer below so both
+        // ends agree on it. It must NOT be derived from public transfer
+        // parameters: the per-session symbol key is derived from it, so a
+        // predictable id (e.g. hash(host, port, file_size)) would yield a
+        // predictable, reused key and let symbols captured from one upload be
+        // replayed into a later same-size one.
+        let session_id: u64 = super::fec::random_session_id();
 
         let key = super::fec::derive_symbol_key(self.auth_token.as_deref(), session_id);
         let authenticated = key.is_some();
@@ -824,7 +821,9 @@ impl AftpClient {
         declared_size: u64,
         progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     ) -> AftResult<u64> {
-        use super::fec::transfer::{recv_object, FecParams, Feedback, DEFAULT_WINDOW};
+        use super::fec::transfer::{
+            recv_object_into, FecParams, Feedback, FileBlockWriter, DEFAULT_WINDOW,
+        };
         use super::fec::udp::DataPlane;
 
         let offer = parse_fec_offer(&offer_frame.payload)?;
@@ -891,10 +890,37 @@ impl AftpClient {
             initial_loss_hint: 0.0,
         };
 
+        // Stream each block straight to a temporary file as it decodes, so peak
+        // memory is the decoder working set (window × block size), not the
+        // whole transfer. A malicious or buggy server therefore cannot exhaust
+        // client memory by declaring a huge `total_len`. The real file is only
+        // materialized after the SHA-256 check, so a failed transfer never
+        // leaves a partial file at the destination.
+        let tmp = {
+            let mut name = dest
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default();
+            name.push(".aftp-part");
+            dest.with_file_name(name)
+        };
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+
         // Initial guess only — the receiver measures the real RTT from its own
         // NeedMore round-trips and adapts its patience as it learns.
         let rtt = std::time::Duration::from_millis(50);
-        let recv_result = recv_object(&plane, &fb_tx, &params, rtt).await;
+        let recv_result = match FileBlockWriter::create(&tmp, offer.total_len).await {
+            Ok(mut sink) => {
+                let r = recv_object_into(&plane, &mut sink, &fb_tx, &params, rtt).await;
+                if r.is_ok() {
+                    let _ = sink.finish().await;
+                }
+                r
+            }
+            Err(e) => Err(e),
+        };
 
         // Close the feedback channel so the writer task can finish and hand
         // the control stream back, even if the receive failed.
@@ -903,9 +929,13 @@ impl AftpClient {
             .await
             .map_err(|e| AftError::Other(format!("FEC feedback task: {}", e)))??;
 
-        let (data, _stats) = recv_result?;
+        if let Err(e) = recv_result {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            drop(writer);
+            return Err(e);
+        }
         if let Some(cb) = &progress {
-            cb(data.len() as u64, Some(offer.total_len));
+            cb(offer.total_len, Some(offer.total_len));
         }
 
         // The server sends DATA_END on the control plane once every block is
@@ -913,35 +943,48 @@ impl AftpClient {
         let end_frame = Self::expect_frame(&mut reader, FRAME_DATA_END, 64 * 1024).await?;
         let end_data = parse_data_end(&end_frame.payload)?;
 
-        if end_data.total_bytes != data.len() as u64 {
-            return Err(AftError::Other(format!(
+        let cleanup_and = |e: AftError| async {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            e
+        };
+
+        if end_data.total_bytes != offer.total_len {
+            return Err(cleanup_and(AftError::Other(format!(
                 "FEC byte count mismatch: expected {}, got {}",
-                end_data.total_bytes,
-                data.len()
-            )));
+                end_data.total_bytes, offer.total_len
+            )))
+            .await);
         }
         if end_data.checksum_algo == CHECKSUM_SHA256 && !end_data.checksum.is_empty() {
-            let hash = sha2::Sha256::digest(&data);
+            // Stream the temp file through SHA-256 rather than loading it, so
+            // verification is also bounded memory.
+            let mut f = tokio::fs::File::open(&tmp).await?;
+            let mut hasher = sha2::Sha256::new();
+            let mut buf = vec![0u8; 1 << 20];
+            loop {
+                let n = tokio::io::AsyncReadExt::read(&mut f, &mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            let hash = hasher.finalize();
             if hash.as_slice() != end_data.checksum.as_slice() {
-                return Err(AftError::ChecksumMismatch {
+                return Err(cleanup_and(AftError::ChecksumMismatch {
                     expected: hex::encode(&end_data.checksum),
                     actual: hex::encode(hash),
-                });
+                })
+                .await);
             }
         }
 
-        // Verified — only now does anything touch the destination.
-        if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent).await.ok();
-        }
-        let mut file = tokio::fs::File::create(dest).await?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, &data).await?;
-        file.flush().await?;
+        // Verified — atomically move the completed temp file into place.
+        tokio::fs::rename(&tmp, dest).await?;
 
         // Keep the writer alive to this point so the control connection is not
         // torn down before the server has finished sending.
         drop(writer);
-        Ok(data.len() as u64)
+        Ok(offer.total_len)
     }
 
     // ── DOWNLOAD RANGE ──────────────────────────────────────────────────────

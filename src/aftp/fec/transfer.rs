@@ -486,6 +486,11 @@ pub async fn send_blocks(
     Ok(stats)
 }
 
+// Eight parameters, because this drives the whole in-flight state machine from
+// one feedback message: the block table, the ack counter, the loss estimate,
+// the pacer, and the stats all move together. Bundling them into a struct would
+// obscure rather than clarify the borrows.
+#[allow(clippy::too_many_arguments)]
 async fn apply_feedback(
     msg: Feedback,
     inflight: &mut HashMap<u32, InFlight>,
@@ -665,6 +670,19 @@ pub async fn recv_object_into(
                 }
                 if *done.get(&block_id).unwrap_or(&false) {
                     // Already complete; the sender has not yet seen our ack.
+                    continue;
+                }
+
+                // Bound the working set: a well-behaved sender keeps only
+                // `window` blocks in flight, so never needs more than that many
+                // decoders (~8 MiB each). A malicious sender could otherwise
+                // spray one symbol across thousands of distinct block ids and
+                // force us to allocate a decoder for each. Refuse to open a new
+                // decoder past the window; the dropped symbol is simply resent
+                // by the fountain, so a legitimate sender loses nothing.
+                let max_decoders = params.window.max(1);
+                if !decoders.contains_key(&block_id) && decoders.len() >= max_decoders {
+                    stats.symbols_rejected += 1;
                     continue;
                 }
 

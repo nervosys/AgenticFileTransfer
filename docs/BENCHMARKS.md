@@ -291,9 +291,9 @@ TCP path uses BBR congestion control by default (`AFT_TCP_CC` to override).
 edges out atp (both modes, 3.0 s) and rsync (3.3 s), and it does so *tightly*:
 all nine AFT runs fell in 2.74–2.92 s. BBR's pacing keeps the distribution
 narrow — its slowest run still beat every other tool's median. The other tools
-are bimodal here: the 0.1% random loss occasionally triggers a CUBIC window cut
-(atp-tcp ranged to 14.6 s, rsync and atp-rq to ~29 s in earlier sweeps), so
-their medians sit higher and their tails are far worse. This is also why an
+are bimodal here: the 0.1% random loss occasionally triggers a CUBIC window cut,
+so their tails blow out — across the same nine runs atp-tcp reached 14.6 s,
+atp-rq 35.9 s, and rsync 25.5 s, dragging their medians above AFT's. This is also why an
 earlier 3-run sample wrongly showed AFT behind — on a high-variance link, three
 runs is too few to trust; nine tells the real story.
 
@@ -329,10 +329,10 @@ for.
    necessarily from ATP's design. These results support "AFT's FEC path
    survives links where our ATP build did not," not "AFT's algorithm beats
    ATP's."
-2. **Memory is AFT's cost.** `aft --fec` peaks at ~136–160 MB RSS (window ×
-   8 MiB blocks + RaptorQ working set) versus ~8–13 MB for rsync and ATP.
-   The RSS is bounded and independent of file size, but it is roughly 12–15×
-   the other tools'.
+2. **Memory is AFT's cost.** `aft --fec` peak RSS ranged 136–168 MB across all
+   measured runs (window × 8 MiB blocks + RaptorQ working set) versus ~8–13 MB
+   for rsync and ATP. The RSS is bounded and independent of file size, but it is
+   roughly 12–15× the other tools'.
 3. **Broken-regime variance is high.** ~10 Mbit at 10% loss with reordering
    leaves little headroom; runs ranged 89.7–233.9 s and pure wire time for
    50 MB at 10 Mbit is ~42 s, so real room to improve remains — it just beats
