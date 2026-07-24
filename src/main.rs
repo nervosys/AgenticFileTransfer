@@ -336,6 +336,7 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
             tls_key,
             rate_limit: _,
             max_connections,
+            fec_insecure,
             transport,
         } => {
             let transport_type: aftp::transport::TransportType = transport
@@ -360,7 +361,8 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
                 tls_cert.clone(),
                 tls_key.clone(),
                 *max_connections,
-            );
+            )
+            .with_unauthenticated_fec(*fec_insecure);
             server.run().await?;
             Ok(OutputResult::success("serve"))
         }

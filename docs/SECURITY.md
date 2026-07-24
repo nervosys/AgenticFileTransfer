@@ -528,13 +528,18 @@ GCM tag with the header as AAD means any edit to the session id, block id,
 length, nonce, or ciphertext fails verification and the datagram is dropped
 before it reaches the decoder.
 
-### Unauthenticated mode is lab-only
+### Unauthenticated mode is lab-only, and refused by default
 
-With no auth token there is no symbol key, so `--fec` falls back to a CRC32 that
-detects corruption but provides **neither confidentiality nor authenticity**. It
-is reachable only when the control plane itself is unauthenticated, and it must
-**never** carry CUI. For CMMC L2 / CUI, always run `--fec` with `--auth-token`
-(preferably over `aftps://`).
+With no auth token there is no symbol key, so `--fec` would fall back to a CRC32
+that detects corruption but provides **neither confidentiality nor
+authenticity**. To prevent that from happening by accident, an **unauthenticated
+server refuses FEC by default** (`server.rs`): it does not advertise `CAP_FEC`,
+so a client that asked for `--fec` transparently falls back to the reliable
+path. The only way to run the cleartext data plane is to start the server with
+the explicit `--fec-insecure` flag, which is documented for physically trusted
+links exclusively and must **never** carry CUI. For CMMC L2 / CUI, always run
+`--fec` with `--auth-token` (preferably over `aftps://`), which gives the
+AES-256-GCM path above.
 
 ### FIPS status
 
@@ -663,28 +668,48 @@ path (omit `--fec`) until the data-plane crypto is routed through `aws-lc-rs`.
 | libloading | 0.8          | Medium   | Dynamic library loading (inherently risky)    |
 | quinn      | 0.11         | Low      | QUIC implementation using rustls              |
 | suppaftp   | 6.x          | Medium   | Less widely audited                           |
-| russh      | 0.46         | Medium   | SSH implementation, less audited than OpenSSH |
-| rust-s3    | 0.35         | Low      | HTTP-based, uses reqwest                      |
+| russh      | 0.46         | Medium   | SSH; RUSTSEC-2026-0154 alloc DoS — deferred major bump (see Appendix A) |
+| rust-s3    | 0.35         | Medium   | Pins old quick-xml/rustls-webpki (RUSTSEC-2026-0194/0195/0098) — deferred |
 | pqc_kyber  | 0.7          | **High** | RUSTSEC-2023-0079 KyberSlash timing attack    |
 | crc32fast  | 1.4          | Low      | Hardware-accelerated CRC32, widely used       |
 | aws-lc-rs  | 1.x (opt)    | Low      | FIPS 140-3 validated (cert #4631)             |
 
-### `cargo audit` Results (v1.3.0)
+### `cargo audit` Results (refreshed 2026-07)
 
-| Advisory          | Crate               | Severity       | Description                                     | Fix Available |
-| ----------------- | ------------------- | -------------- | ----------------------------------------------- | ------------- |
-| RUSTSEC-2023-0079 | pqc_kyber 0.7.1     | 🔴 HIGH (7.4)   | KyberSlash: timing side-channel in divisions    | ❌ No          |
-| RUSTSEC-2023-0071 | rsa 0.9.10          | 🟡 MEDIUM (5.9) | Marvin Attack: timing in PKCS#1 v1.5 decryption | ❌ No          |
-| RUSTSEC-2025-0052 | async-std 1.13.2    | ⚠️ Unmaintained | Discontinued, no further updates                | ❌ No          |
-| RUSTSEC-2025-0119 | number_prefix 0.4.0 | ⚠️ Unmaintained | No active maintainer                            | ❌ No          |
-| RUSTSEC-2025-0134 | rustls-pemfile      | ⚠️ Unmaintained | 1.0.4 + 2.2.0, no active maintainer             | ❌ No          |
+**Fixed in this release** by pulling semver-compatible patched versions (no API
+change): the highest-severity, remotely-reachable advisories.
 
-**Notes:**
-- `rsa 0.9.10` is a transitive dependency via `russh-keys` (used by SFTP protocol).
-  AFT does not directly call RSA decryption; risk is limited to SFTP key negotiation.
-- `async-std` is a transitive dependency via `suppaftp` (FTP protocol).
-- `number_prefix` is a transitive dependency via `indicatif` (progress bars).
-- `rustls-pemfile` appears in both versions due to dependency tree convergence.
+| Advisory          | Crate           | Was → Now          | Description                                            |
+| ----------------- | --------------- | ------------------ | ----------------------------------------------------- |
+| RUSTSEC-2026-0185 | quinn-proto     | 0.11.14 → 0.11.15  | Remote memory exhaustion via unbounded stream reassembly (QUIC path) |
+| RUSTSEC-2026-0098/0099/0104 | rustls-webpki (0.103) | 0.103.10 → 0.103.13 | Name-constraint bypasses + reachable CRL panic in cert validation |
+| RUSTSEC-2026-0204 | crossbeam-epoch | 0.9.18 → 0.9.20    | Invalid pointer deref (dev-only, via criterion)       |
+
+**Remaining — no upstream fix (accepted, monitored):**
+
+| Advisory          | Crate           | Severity        | Exposure in AFT                                                  |
+| ----------------- | --------------- | --------------- | --------------------------------------------------------------- |
+| RUSTSEC-2023-0079 | pqc_kyber 0.7.1 | 🔴 HIGH (7.4)    | KyberSlash timing side-channel. Core PQC KEM; no fixed release exists. Local-attacker timing oracle, not remote. Tracked for migration to a maintained ML-KEM crate. |
+| RUSTSEC-2023-0071 | rsa 0.9.10      | 🟡 MEDIUM (5.9)  | Marvin timing attack. Transitive via `russh-keys` (SFTP only); AFT performs no RSA decryption itself. No fixed release. |
+
+**Remaining — fix requires a breaking major bump of an optional protocol
+handler (deferred to a dedicated migration, not this security release):**
+
+| Advisory          | Crate                    | Blocked by                | Exposure                                                                 |
+| ----------------- | ------------------------ | ------------------------- | ------------------------------------------------------------------------ |
+| RUSTSEC-2026-0154/0153 | russh / russh-cryptovec 0.46 | needs russh ≥0.60.3 (0.46→0.62 API break; `russh-keys` merged into `russh`) | Unbounded 32-bit allocation — a malicious SSH *server* can exhaust a connecting client. SFTP/SCP handler only; not reachable in AFTP/HTTP/S3 transfers. |
+| RUSTSEC-2026-0194/0195 | quick-xml 0.32           | pinned by `rust-s3` 0.35.1 (latest); needs quick-xml ≥0.41 | Quadratic / unbounded-alloc XML DoS. S3 handler only, parsing responses from the configured (semi-trusted) S3 endpoint. |
+| RUSTSEC-2026-0098/0099/0104 | rustls-webpki 0.101.7 | pinned by `rust-s3` 0.35.1's old `rustls 0.21` chain | Same cert-validation flaws as above, but on the S3 handler's TLS stack. The main AFTP/HTTP TLS path uses rustls 0.23 + webpki 0.103.13 (fixed). |
+
+**Unmaintained-crate warnings (informational):** `async-std` (via suppaftp/FTP),
+`number_prefix` (via indicatif), `rustls-pemfile`, `spin` (yanked, via
+rsa/ssh-key). None are known-exploitable; tracked with their parent crates.
+
+**Remediation plan for the deferred items:** a follow-up PR migrates `russh`
+0.46 → 0.62 (SFTP handler) and evaluates replacing or patching `rust-s3` to pull
+`quick-xml` ≥0.41 and `rustls` 0.23. These are isolated to the SFTP and S3
+protocol handlers and do not affect the AFTP data path, TLS control plane, or
+the FEC data plane.
 
 ---
 

@@ -366,6 +366,13 @@ pub enum Command {
         #[arg(long, default_value = "1000")]
         max_connections: usize,
 
+        /// Allow `--fec` on this server without an auth token, where symbols
+        /// are CRC32-protected only (NO encryption). Trusted links only —
+        /// never for sensitive/CUI data. Without this, an unauthenticated
+        /// server refuses FEC and clients fall back to the reliable path.
+        #[arg(long)]
+        fec_insecure: bool,
+
         /// Transport layer: tcp, ws (WebSocket), or quic
         #[arg(long, default_value = "tcp")]
         transport: String,

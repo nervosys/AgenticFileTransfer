@@ -379,10 +379,11 @@ the reliable TCP path.
 
 > **Confidentiality requires authentication.** Encryption is keyed off the
 > connection's auth token, so use `--auth-token` (or `aftps://`) for any
-> sensitive data. An *unauthenticated* server has no symbol key, so `--fec`
-> falls back to a CRC32 that gives neither confidentiality nor authenticity —
-> intended only for a physically trusted link, never for CUI. See
-> [docs/SECURITY.md](docs/SECURITY.md).
+> sensitive data. An *unauthenticated* server has no symbol key, so it
+> **refuses `--fec` by default** and the client falls back to the reliable
+> path — the cleartext CRC32 data plane runs only if the server is started with
+> `--fec-insecure`, which is for physically trusted links and never for CUI.
+> See [docs/SECURITY.md](docs/SECURITY.md).
 
 When to reach for `--fec` versus the default (BBR) TCP path, measured on
 netem-shaped links, 50 MB file:
@@ -412,6 +413,7 @@ Full methodology, numbers, and caveats: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
 | `--transport`       | `tcp`     | Transport layer: `tcp`, `ws`, or `quic`    |
 | `--rate-limit`      | `0`       | Max bandwidth in bytes/sec (0 = unlimited) |
 | `--max-connections` | `1000`    | Max concurrent connections (0 = unlimited) |
+| `--fec-insecure`    | `false`   | Allow `--fec` without auth (CRC32, no encryption; trusted links only) |
 
 ## Agent Mode
 

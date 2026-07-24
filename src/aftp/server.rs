@@ -223,6 +223,7 @@ pub struct AftpServer {
     tls_key_path: Option<String>,
     max_connections: usize,
     fec: bool,
+    fec_allow_unauthenticated: bool,
 }
 
 impl AftpServer {
@@ -255,6 +256,13 @@ impl AftpServer {
             // client actually negotiates `CAP_FEC`, and the UDP socket is
             // bound per transfer rather than held open by the listener.
             fec: true,
+            // Off by default: without an auth token the data plane has no
+            // symbol key, so FEC symbols would carry only a CRC32 — no
+            // confidentiality, no authenticity. Rather than silently move file
+            // data over the clear UDP plane, refuse FEC on an unauthenticated
+            // server and let the client fall back to the reliable path. An
+            // operator on a physically trusted link can opt back in.
+            fec_allow_unauthenticated: false,
         }
     }
 
@@ -262,6 +270,14 @@ impl AftpServer {
     #[allow(dead_code)]
     pub fn with_fec(mut self, enable: bool) -> Self {
         self.fec = enable;
+        self
+    }
+
+    /// Allow the fountain-coded data plane on an *unauthenticated* server,
+    /// where symbols are CRC32-protected only (no encryption). Trusted links
+    /// exclusively — never for sensitive/CUI data.
+    pub fn with_unauthenticated_fec(mut self, allow: bool) -> Self {
+        self.fec_allow_unauthenticated = allow;
         self
     }
 
@@ -363,6 +379,7 @@ impl AftpServer {
             max_frame_size: self.max_frame_size,
             verbose: self.verbose,
             fec: self.fec,
+            fec_allow_unauthenticated: self.fec_allow_unauthenticated,
             rate_limiter: Mutex::new(AuthRateLimiter::new()),
             sessions: Mutex::new(SessionStore::new()),
         });
@@ -453,6 +470,7 @@ struct ServerState {
     /// Serve transfers over the fountain-coded UDP data plane when the client
     /// asks for it.
     fec: bool,
+    fec_allow_unauthenticated: bool,
     rate_limiter: Mutex<AuthRateLimiter>,
     sessions: Mutex<SessionStore>,
 }
@@ -648,6 +666,20 @@ where
     // client's bits, so clearing here yields the intersection.
     if !state.fec {
         agreed_caps &= !CAP_FEC;
+    } else if state.auth_token.is_none() && !state.fec_allow_unauthenticated {
+        // No auth token → no symbol key → FEC symbols would be CRC32-only
+        // (cleartext, no authenticity). Refuse rather than silently run the
+        // data plane in the clear; the client transparently falls back to the
+        // reliable path. `--fec-insecure` re-enables it for trusted links.
+        agreed_caps &= !CAP_FEC;
+        if hello_data.capabilities & CAP_FEC != 0 {
+            eprintln!(
+                "{}",
+                "  note: refused --fec on an unauthenticated server (symbols would be \
+                 unencrypted); start with --auth-token, or --fec-insecure for a trusted link"
+                    .dimmed()
+            );
+        }
     }
 
     let use_compression = agreed_caps & CAP_COMPRESSION != 0;

@@ -1562,7 +1562,11 @@ mod aftp_e2e_tests {
             None,
             None,
             0,
-        );
+        )
+        // Localhost lab tests: allow the unauthenticated (CRC32) data plane so
+        // the round-trip tests still exercise UDP. Production refuses this by
+        // default (see the `--fec-insecure` gate).
+        .with_unauthenticated_fec(true);
         tokio::spawn(async move {
             let _ = server.run().await;
         })
@@ -1877,6 +1881,47 @@ mod aftp_e2e_tests {
         let out = dir.path().join("fallback-out.bin");
         let client = make_client(port).with_fec(true);
         let n = client.download("/fallback.bin", &out, None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), content);
+
+        handle.abort();
+    }
+
+    /// An unauthenticated server refuses the data plane by default (symbols
+    /// would be CRC32-only, unencrypted), so a client asking for `--fec` must
+    /// transparently fall back to the reliable path and still succeed. This is
+    /// the M5 gate: FEC never silently runs in the clear.
+    #[tokio::test]
+    async fn unauthenticated_fec_is_refused_by_default() {
+        let dir = TempDir::new().unwrap();
+        let content = fec_payload(2 * 1024 * 1024);
+        std::fs::write(dir.path().join("gated.bin"), &content).unwrap();
+
+        let port = 12658;
+        // No auth token AND no `.with_unauthenticated_fec(true)` — the gate
+        // engages, so `fec` is still enabled but must be refused for lack of a
+        // key.
+        let server = AftpServer::new(
+            dir.path(),
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let out = dir.path().join("gated-out.bin");
+        let client = make_client(port).with_fec(true);
+        let n = client.download("/gated.bin", &out, None).await.unwrap();
 
         assert_eq!(n, content.len() as u64);
         assert_eq!(std::fs::read(&out).unwrap(), content);
