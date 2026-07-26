@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // Suppress dead-code warnings: these transport abstractions are public API
 // reserved for future multi-transport support (WebSocket, QUIC). The TCP
 // transport is actively used by AftpClient; WS and QUIC are scaffolded.

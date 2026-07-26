@@ -766,7 +766,9 @@ This software has been publicly released and a notification has been submitted t
 
 ## License
 
-This project is dual-licensed:
+AFT is **dual-licensed** — see [LICENSING.md](LICENSING.md) for the full explanation:
 
-- **AGPL-3.0-or-later** — Free for open-source use under the terms of the [GNU Affero General Public License v3.0](LICENSE).
-- **Commercial License** — For proprietary/commercial use without AGPL obligations, contact [NERVOSYS](https://nervosys.ai) for a commercial license.
+- **AGPL-3.0-or-later** (default) — free for open-source use under the [GNU Affero General Public License v3.0](LICENSE). Note the AGPL's network clause (§13): if you run a modified AFT as a network service, you must offer that service's users the corresponding source.
+- **Commercial License** — for proprietary or SaaS use **without** AGPL's copyleft/source-disclosure obligations. See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) and contact **licensing@nervosys.com**.
+
+Copyright © 2024–2026 Nervosys, LLC. `SPDX-License-Identifier: AGPL-3.0-or-later`.

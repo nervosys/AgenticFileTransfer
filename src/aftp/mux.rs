@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 #![allow(dead_code)]
 //! AFTP multiplexed streams: concurrent transfers over a single connection.
 //!

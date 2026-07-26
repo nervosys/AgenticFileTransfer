@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! DoD classification levels and compliance enforcement.
 //!
 //! Implements classification markings per Executive Order 13526 and

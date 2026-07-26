@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Configuration file support (~/.aft/config.toml).
 //!
 //! Loads default settings from a TOML file so users don't need to

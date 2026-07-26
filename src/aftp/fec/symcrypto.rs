@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Symbol-plane AEAD and KDF, with an optional FIPS-validated backend.
 //!
 //! The FEC data plane needs exactly two primitives: **AES-256-GCM** (seal/open a

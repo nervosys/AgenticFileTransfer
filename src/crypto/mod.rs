@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Cryptographic subsystem for AFT.
 //!
 //! Provides three encryption methods:

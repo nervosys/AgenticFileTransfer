@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Block scheduler — the loop that actually moves a file over the data plane.
 //!
 //! The sender sprays symbols for a window of blocks without waiting for
@@ -40,9 +42,9 @@ use super::pacing::{repair_symbol_count, Pacer};
 /// Feedback-loop tracing, gated on the `AFT_FEC_TRACE` environment variable so
 /// it costs nothing in production. When set, the scheduler narrates every
 /// loss-estimate update, repair round, and pacer state change to stderr — the
-/// raw material for diagnosing the broken-regime overhead (see `docs/HANDOFF.md`
-/// §6.3). Checked once and cached; trace points sit only at feedback events,
-/// never in the per-symbol path.
+/// raw material for diagnosing overhead on high-loss links. Checked once and
+/// cached; trace points sit only at feedback events, never in the per-symbol
+/// path.
 fn fec_trace() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("AFT_FEC_TRACE").is_some())

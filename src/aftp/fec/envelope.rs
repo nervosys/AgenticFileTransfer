@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Authenticated, encrypted symbol envelope for the AFTP FEC data plane.
 //!
 //! Every datagram on the data plane is one envelope: a fixed header, the

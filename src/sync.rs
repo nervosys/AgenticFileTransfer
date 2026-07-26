@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Sync engine — rsync/rclone-style directory synchronization.
 //!
 //! Supports one-way sync (source → destination) with:

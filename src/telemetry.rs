@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Telemetry module for anonymous usage data collection.
 //!
-//! This module provides opt-in (enabled by default) anonymous usage telemetry
-//! to help improve AFT. No personal data is collected - only aggregate usage
-//! statistics such as commands used, protocol types, transfer sizes, and error types.
+//! This module provides **opt-in (disabled by default)** anonymous usage
+//! telemetry to help improve AFT. Nothing is collected or transmitted unless
+//! the user explicitly opts in with `aft telemetry opt-in`. When enabled, no
+//! personal data is collected — only aggregate usage statistics such as
+//! commands used, protocol types, transfer sizes, and error types.
 //!
-//! Data is sent to a Nervosys AWS EC2 telemetry endpoint. Users can opt out
-//! at any time via `aft telemetry opt-out`.
+//! When enabled, data is sent to a Nervosys telemetry endpoint. Users can opt
+//! back out at any time via `aft telemetry opt-out`.
 
 use crate::error::{AftError, AftResult};
 use serde::{Deserialize, Serialize};
@@ -22,7 +24,7 @@ pub const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://telemetry.nervosys.com/aft
 /// Telemetry configuration stored on disk (~/.aft/telemetry.json)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryConfig {
-    /// Whether telemetry is enabled (enabled by default)
+    /// Whether telemetry is enabled (disabled by default; opt-in only)
     pub enabled: bool,
 
     /// Anonymous identifier for this installation (UUID v4)
@@ -45,8 +47,10 @@ pub struct TelemetryConfig {
     #[serde(default)]
     pub remote_api_key: Option<String>,
 
-    /// Whether to send telemetry to remote endpoint (enabled by default)
-    #[serde(default = "default_true")]
+    /// Whether to send telemetry to remote endpoint (disabled by default).
+    /// A config file written by an older, opt-out build that omits this field
+    /// deserializes to `false` here, so upgrades never silently keep sending.
+    #[serde(default)]
     pub remote_enabled: bool,
 }
 
@@ -54,21 +58,22 @@ fn default_endpoint() -> String {
     DEFAULT_TELEMETRY_ENDPOINT.to_string()
 }
 
-fn default_true() -> bool {
-    true
-}
+/// Current telemetry config schema version. Bumped from 1 to 2 when the default
+/// changed from opt-out to opt-in, which drives the one-time migration in
+/// [`TelemetryConfig::load`].
+const CONFIG_VERSION: u32 = 2;
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
-            enabled: true, // Enabled by default
+            enabled: false, // Opt-in: disabled until the user runs `telemetry opt-in`
             installation_id: generate_uuid(),
             created_at: chrono::Utc::now().timestamp(),
             preference_changed_at: None,
-            version: 1,
+            version: CONFIG_VERSION,
             remote_endpoint: DEFAULT_TELEMETRY_ENDPOINT.to_string(),
             remote_api_key: None,
-            remote_enabled: true, // Remote sending enabled by default
+            remote_enabled: false, // Opt-in: no remote sending until enabled
         }
     }
 }
@@ -112,14 +117,31 @@ impl TelemetryConfig {
 
         if config_path.exists() {
             let content = fs::read_to_string(&config_path)?;
-            serde_json::from_str(&content)
-                .map_err(|e| AftError::Other(format!("Invalid telemetry config: {}", e)))
+            let mut config: TelemetryConfig = serde_json::from_str(&content)
+                .map_err(|e| AftError::Other(format!("Invalid telemetry config: {}", e)))?;
+            // Migration to opt-in: a config written by an older opt-out build in
+            // which the user never made an explicit choice
+            // (`preference_changed_at` is None) must not keep telemetry on. Only
+            // configs where the user actively chose are left untouched.
+            if config.version < CONFIG_VERSION && config.preference_changed_at.is_none() {
+                config.enabled = false;
+                config.remote_enabled = false;
+                config.version = CONFIG_VERSION;
+                config.save()?;
+            }
+            Ok(config)
         } else {
-            // Create default config (enabled by default)
+            // First run: create the default (opt-in, telemetry disabled) config.
             let config = Self::default();
             config.save()?;
             Ok(config)
         }
+    }
+
+    /// Whether a telemetry config file already exists on disk. Used to detect a
+    /// first run so the CLI can show a one-time opt-in notice.
+    pub fn exists() -> bool {
+        Self::config_path().map(|p| p.exists()).unwrap_or(false)
     }
 
     /// Save telemetry config to disk
@@ -782,8 +804,8 @@ Status: {status}
 Endpoint: {endpoint}
 
 Manage your preference:
-  aft telemetry opt-in   - Enable data collection (default)
-  aft telemetry opt-out  - Disable data collection
+  aft telemetry opt-in   - Enable data collection
+  aft telemetry opt-out  - Disable data collection (default)
   aft telemetry reset    - Generate new anonymous ID
   aft telemetry status   - Show current status
   aft telemetry sync     - Manually sync to remote
@@ -835,9 +857,10 @@ mod tests {
     fn test_default_config() {
         let config = TelemetryConfig::default();
 
-        assert!(config.enabled);
-        assert!(config.remote_enabled);
-        assert_eq!(config.version, 1);
+        // Opt-in by default: telemetry is off until the user explicitly enables it.
+        assert!(!config.enabled);
+        assert!(!config.remote_enabled);
+        assert_eq!(config.version, CONFIG_VERSION);
         assert_eq!(config.remote_endpoint, DEFAULT_TELEMETRY_ENDPOINT);
         assert!(config.remote_api_key.is_none());
         assert!(!config.installation_id.is_empty());

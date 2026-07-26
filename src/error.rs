@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Error types for the AFT library.
 //!
 //! Provides a unified error enum covering all protocol, I/O, and

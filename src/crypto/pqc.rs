@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Post-Quantum Cryptography: ML-KEM-1024 (NIST FIPS 203) + AES-256-GCM.
 //!
 //! Provides NIST FIPS 203-compliant key encapsulation with ML-KEM-1024

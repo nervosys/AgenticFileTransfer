@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! AFTP client: connects to an AFTP server and performs file operations.
 //!
 //! Each public method opens a fresh TCP connection, performs the HELLO

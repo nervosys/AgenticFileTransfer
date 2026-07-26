@@ -7,7 +7,7 @@
 # byte counts meaningless.
 set -euo pipefail
 
-ROOT=${1:-/root/bench/data}
+ROOT=${1:-${BENCH_ROOT:-$HOME/aft-bench}/data}
 
 # Deterministic incompressible stream of $1 bytes seeded by label $2.
 prand() {

@@ -6,8 +6,9 @@ reported as its failure status, never silently dropped.
 """
 import json, statistics, sys, collections, os
 
-RAW = sys.argv[1] if len(sys.argv) > 1 else "/root/bench/results.jsonl"
-OUT = sys.argv[2] if len(sys.argv) > 2 else "/root/bench/results.json"
+_bench_root = os.environ.get("BENCH_ROOT", os.path.join(os.path.expanduser("~"), "aft-bench"))
+RAW = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_bench_root, "results.jsonl")
+OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(_bench_root, "results.json")
 
 REGIMES = ["perfect", "good", "bad", "broken"]
 WORKLOADS = ["small_500k", "single_50m", "single_500m", "tree_2000x1k", "tree_400x1m"]

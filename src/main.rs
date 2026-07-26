@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 mod aftp;
 mod audit;
 mod cli;
@@ -133,7 +135,10 @@ async fn main() {
         }
     }
 
-    // Initialize telemetry (best-effort, never block on failure)
+    // Initialize telemetry (best-effort, never block on failure). Telemetry is
+    // opt-in and off by default; detect a first run *before* the collector
+    // creates the config file so we can show a one-time opt-in notice.
+    let telemetry_first_run = !telemetry::TelemetryConfig::exists();
     let mut telemetry = telemetry::TelemetryCollector::new().ok();
     if let Some(ref mut t) = telemetry {
         t.track(telemetry::TelemetryEvent::AppStarted {
@@ -141,6 +146,14 @@ async fn main() {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
         });
+    }
+    // One-time, human-only notice. Suppressed for machine/JSON consumers
+    // (`--agent`, `--quiet`) so it never contaminates parseable output.
+    if telemetry_first_run && !cli.agent && !cli.quiet {
+        eprintln!(
+            "note: AFT collects no usage telemetry by default. If you'd like to help improve \
+             it, opt in with `aft telemetry opt-in` (details: `aft telemetry status`)."
+        );
     }
 
     let cmd_start = std::time::Instant::now();

@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Security audit logging for DoD compliance (CMMC 2.0 AU domain).
 //!
 //! Produces structured JSON audit records for security-relevant events

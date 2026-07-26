@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Transfer history logging (~/.aft/history.jsonl).
 //!
 //! Appends a structured JSON Lines record after each completed transfer

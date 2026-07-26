@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // The codec, envelope, and pacer are complete and tested, but the client and
 // server splices that consume them are still landing, so the binary target
 // does not yet reference every item.

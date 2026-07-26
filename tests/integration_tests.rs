@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Integration and unit tests for the AFT codebase.
 
 mod frame_tests {
@@ -2735,12 +2737,15 @@ mod telemetry_tests {
     use aft::telemetry::TelemetryConfig;
 
     #[test]
-    fn default_config_enabled() {
+    fn default_config_opt_in() {
         let config = TelemetryConfig::default();
-        assert!(config.enabled, "Telemetry should be enabled by default");
         assert!(
-            config.remote_enabled,
-            "Remote telemetry should be enabled by default"
+            !config.enabled,
+            "Telemetry must be opt-in: disabled by default"
+        );
+        assert!(
+            !config.remote_enabled,
+            "Remote telemetry must be opt-in: disabled by default"
         );
     }
 
@@ -2775,9 +2780,10 @@ mod telemetry_tests {
     }
 
     #[test]
-    fn config_version_is_one() {
+    fn config_version_is_two() {
+        // Bumped to 2 when the default flipped from opt-out to opt-in.
         let config = TelemetryConfig::default();
-        assert_eq!(config.version, 1);
+        assert_eq!(config.version, 2);
     }
 }
 
@@ -4366,7 +4372,10 @@ mod telemetry_extended_tests {
 
     #[test]
     fn telemetry_config_is_enabled_reflects_field() {
+        // Default is opt-in (off); is_enabled() tracks the field either way.
         let mut config = TelemetryConfig::default();
+        assert!(!config.is_enabled());
+        config.enabled = true;
         assert!(config.is_enabled());
         config.enabled = false;
         assert!(!config.is_enabled());
@@ -4375,10 +4384,13 @@ mod telemetry_extended_tests {
     #[test]
     fn telemetry_config_is_remote_enabled() {
         let mut config = TelemetryConfig::default();
+        // Both switches on → remote sending on.
+        config.enabled = true;
+        config.remote_enabled = true;
         assert!(config.is_remote_enabled());
         config.remote_enabled = false;
         assert!(!config.is_remote_enabled());
-        // Also false if main switch is off
+        // Also false if the main switch is off.
         config.remote_enabled = true;
         config.enabled = false;
         assert!(!config.is_remote_enabled());

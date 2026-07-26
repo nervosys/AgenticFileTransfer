@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! # AFT — Agentic File Transfer
 //!
 //! A high-performance, protocol-agnostic file transfer library designed

@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! RaptorQ block codec — the fountain layer of the AFTP data plane.
 //!
 //! A transfer is cut into fixed-size **blocks** (8 MiB by default). Each block

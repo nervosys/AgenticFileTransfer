@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! BBR-style pacing for the FEC data plane.
 //!
 //! The data plane sends UDP datagrams, so there is no kernel congestion

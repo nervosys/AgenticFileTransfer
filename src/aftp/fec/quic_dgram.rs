@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! QUIC-datagram data plane: an alternative carrier for fountain symbols.
 //!
 //! [`super::udp`] sprays symbols over a bare UDP socket. This module carries the

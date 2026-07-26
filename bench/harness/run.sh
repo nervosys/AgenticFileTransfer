@@ -10,14 +10,17 @@
 # abort still leaves usable data; report.py folds them into results.json.
 set -u
 
-H=/root/bench/harness
-DATA=/root/bench/data
-DST=/root/bench/dst
-LOGS=/root/bench/logs
-OUT=${OUT:-/root/bench/results.jsonl}
+# Root of the benchmark workspace. Override BENCH_ROOT to relocate it; the tool
+# binaries can be pointed at explicitly with AFT_BIN / ATP_BIN.
+BENCH_ROOT=${BENCH_ROOT:-$HOME/aft-bench}
+H=$BENCH_ROOT/harness
+DATA=$BENCH_ROOT/data
+DST=$BENCH_ROOT/dst
+LOGS=$BENCH_ROOT/logs
+OUT=${OUT:-$BENCH_ROOT/results.jsonl}
 
-AFT=/root/bench/aft-src/target/release/aft
-ATP=/home/test/bench/asupersync/target/release/atp
+AFT=${AFT_BIN:-$BENCH_ROOT/aft-src/target/release/aft}
+ATP=${ATP_BIN:-atp}
 
 IP_B=10.0.0.2
 RSYNC_PORT=8730
@@ -119,14 +122,14 @@ kill_servers() {
 dst_bytes() { find "$DST" -type f -printf '%s\n' 2>/dev/null | awk '{s+=$1} END{print s+0}'; }
 src_bytes() { find "$1" -type f -printf '%s\n' 2>/dev/null | awk '{s+=$1} END{print s+0}'; }
 
-cat > /root/bench/rsyncd.conf <<EOF
+cat > $BENCH_ROOT/rsyncd.conf <<EOF
 uid = root
 gid = root
 use chroot = no
 max connections = 8
-pid file = /root/bench/rsyncd.pid
-lock file = /root/bench/rsyncd.lock
-log file = /root/bench/rsyncd.log
+pid file = $BENCH_ROOT/rsyncd.pid
+lock file = $BENCH_ROOT/rsyncd.lock
+log file = $BENCH_ROOT/rsyncd.log
 [data]
   path = $DST
   read only = false
@@ -153,7 +156,7 @@ measure() {
   case "$tool" in
     rsync)
       port=$RSYNC_PORT
-      ip netns exec ns_b rsync --daemon --config=/root/bench/rsyncd.conf \
+      ip netns exec ns_b rsync --daemon --config=$BENCH_ROOT/rsyncd.conf \
         --port $RSYNC_PORT --no-detach >"$sl" 2>&1 &
       client_cmd=(rsync -a --port $RSYNC_PORT "$src/" "rsync://$IP_B/data/")
       ;;

@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! DoD (Department of Defense) Cross-Domain Solution protocol handler.
 //!
 //! Wraps HTTPS transfers with DoD classification headers, enforces

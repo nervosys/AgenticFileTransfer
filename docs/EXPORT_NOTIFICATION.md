@@ -36,7 +36,7 @@ Pursuant to §742.15(b) of the Export Administration Regulations (EAR), this ema
 
 ## Implementation Notes
 
-- Encryption is performed using published, well-known algorithms implemented by open-source Rust libraries (rustls, ring, aes-gcm, pqc_kyber, quinn).
+- Encryption is performed using published, well-known algorithms implemented by open-source Rust libraries (rustls, aws-lc-rs, aes-gcm, ml-kem, quinn).
 - The neural network cipher is an experimental trainable autoencoder; it does not implement a novel cryptographic primitive but rather uses standard MLP weights as a symmetric key for a block cipher in OFB/CBC mode.
 - An optional FIPS 140-3 build mode switches the TLS backend to aws-lc-rs (FIPS-validated).
 - No custom hardware, no classified algorithms, no government-furnished cryptographic material.

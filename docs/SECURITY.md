@@ -700,7 +700,7 @@ change): the highest-severity, remotely-reachable advisories.
 | RUSTSEC-2026-0098/0099/0104 | rustls-webpki (0.103) | 0.103.10 → 0.103.13 | Name-constraint bypasses + reachable CRL panic in cert validation |
 | RUSTSEC-2026-0204 | crossbeam-epoch | 0.9.18 → 0.9.20    | Invalid pointer deref (dev-only, via criterion)       |
 
-**Fixed by the major-bump migration (see HANDOFF §6 #1):**
+**Fixed by the major dependency-bump migration:**
 
 | Advisory          | Crate           | Was → Now          | Description                                            |
 | ----------------- | --------------- | ------------------ | ----------------------------------------------------- |

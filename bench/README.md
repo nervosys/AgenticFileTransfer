@@ -17,7 +17,9 @@ client namespace to server namespace, recording wall clock and peak RSS
 
 Contender tools expected on PATH inside the namespaces: `rsync`, `atp`
 (built from [Dicklesworthstone/atp](https://github.com/Dicklesworthstone/atp)),
-and the `aft` release binary (`run.sh` looks for it in `/root/bench/aft-src/target/release`).
+and the `aft` release binary. The harness roots its workspace at `$BENCH_ROOT`
+(default `$HOME/aft-bench`); override `BENCH_ROOT`, or point `AFT_BIN` / `ATP_BIN`
+directly at the two binaries.
 
 ```bash
 # All defaults: 4 regimes, all tools, per-regime workloads, 3 runs each

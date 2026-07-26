@@ -1,11 +1,12 @@
 #!/bin/bash
 # probe.sh -- nail down the exact working invocation for each tool.
 set -u
-H=/root/bench/harness
-AFT=/root/bench/aft-src/target/release/aft
-ATP=/home/test/bench/asupersync/target/release/atp
-SRC=/root/bench/probe_src
-DST=/root/bench/probe_dst
+BENCH_ROOT=${BENCH_ROOT:-$HOME/aft-bench}
+H=$BENCH_ROOT/harness
+AFT=${AFT_BIN:-$BENCH_ROOT/aft-src/target/release/aft}
+ATP=${ATP_BIN:-atp}
+SRC=$BENCH_ROOT/probe_src
+DST=$BENCH_ROOT/probe_dst
 
 $H/netem.sh up
 $H/netem.sh regime perfect >/dev/null
@@ -17,20 +18,20 @@ mkdir -p $SRC/sub && head -c 100000 /dev/urandom > $SRC/sub/b.bin
 banner() { echo; echo "################ $* ################"; }
 
 banner RSYNC
-cat > /root/bench/rsyncd.conf <<EOF
+cat > $BENCH_ROOT/rsyncd.conf <<EOF
 uid = root
 gid = root
 use chroot = no
 max connections = 8
-pid file = /root/bench/rsyncd.pid
-lock file = /root/bench/rsyncd.lock
-log file = /root/bench/rsyncd.log
+pid file = $BENCH_ROOT/rsyncd.pid
+lock file = $BENCH_ROOT/rsyncd.lock
+log file = $BENCH_ROOT/rsyncd.log
 [data]
   path = $DST
   read only = false
   write only = false
 EOF
-ip netns exec ns_b rsync --daemon --config=/root/bench/rsyncd.conf --port 8730 --no-detach &
+ip netns exec ns_b rsync --daemon --config=$BENCH_ROOT/rsyncd.conf --port 8730 --no-detach &
 RPID=$!
 sleep 1
 ip netns exec ns_a rsync -a --port 8730 "$SRC/" rsync://10.0.0.2/data/

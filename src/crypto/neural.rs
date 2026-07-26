@@ -1,3 +1,5 @@
+// Copyright (c) 2024-2026 Nervosys LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // Matrix multiply loops use explicit indexing for clarity in forward/backward pass
 #![allow(clippy::needless_range_loop)]
 //! Neural Network Encoder-Decoder Cipher.
