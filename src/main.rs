@@ -384,7 +384,7 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
         Command::Remove { url, recursive, force: _ } => cmd_rm(cli, url, *recursive).await,
         Command::Mkdir { url } => cmd_mkdir(cli, url).await,
         Command::Plugin { action } => cmd_plugin(action).await,
-        Command::Crypto { action } => cmd_crypto(action).await,
+        Command::Crypto { action } => cmd_crypto(action, cli.experimental_crypto).await,
         Command::Telemetry { action } => cmd_telemetry(action).await,
     }
 }
@@ -1204,8 +1204,39 @@ async fn cmd_plugin(action: &PluginAction) -> AftResult<OutputResult> {
 // Crypto operations
 // ---------------------------------------------------------------------------
 
-async fn cmd_crypto(action: &cli::CryptoAction) -> AftResult<OutputResult> {
+async fn cmd_crypto(
+    action: &cli::CryptoAction,
+    experimental_crypto: bool,
+) -> AftResult<OutputResult> {
     use cli::CryptoAction;
+
+    // The neural-network cipher is research-grade and has no security proof, so
+    // anything that would use it to protect data is gated behind an explicit
+    // opt-in. `Hybrid` counts too: it encrypts the bulk payload with the neural
+    // cipher (the PQC step only wraps the session key).
+    let requires_experimental = |m: crypto::EncryptionMethod| {
+        matches!(
+            m,
+            crypto::EncryptionMethod::Neural | crypto::EncryptionMethod::Hybrid
+        )
+    };
+    let guard_experimental = |m: crypto::EncryptionMethod| -> AftResult<()> {
+        if requires_experimental(m) && !experimental_crypto {
+            return Err(error::AftError::Other(
+                "the neural-network cipher is experimental and NOT secure; it is disabled by \
+                 default. Re-run with --experimental-crypto to use it, or choose --method pqc \
+                 for real protection."
+                    .to_string(),
+            ));
+        }
+        if requires_experimental(m) {
+            eprintln!(
+                "\x1b[33mWARNING: using the experimental neural cipher — no security proof; \
+                 do not use for sensitive data.\x1b[0m"
+            );
+        }
+        Ok(())
+    };
 
     match action {
         CryptoAction::Keygen { output } => {
@@ -1231,6 +1262,8 @@ async fn cmd_crypto(action: &cli::CryptoAction) -> AftResult<OutputResult> {
             seed,
             output,
         } => {
+            // Training only exists to produce the experimental neural cipher.
+            guard_experimental(crypto::EncryptionMethod::Neural)?;
             let config = crypto::neural::TrainConfig {
                 epochs: *epochs,
                 learning_rate: *learning_rate,
@@ -1262,6 +1295,7 @@ async fn cmd_crypto(action: &cli::CryptoAction) -> AftResult<OutputResult> {
                     method
                 ))
             })?;
+            guard_experimental(enc_method)?;
 
             let input_path = std::path::PathBuf::from(input);
             let output_path = match output {

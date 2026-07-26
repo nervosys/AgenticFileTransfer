@@ -100,6 +100,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub insecure: bool,
 
+    /// Enable experimental, unvetted crypto (the neural-network cipher). Off by
+    /// default: that cipher has no security proof and must not protect real data.
+    #[arg(long, global = true)]
+    pub experimental_crypto: bool,
+
     /// Maximum bandwidth in bytes per second (0 = unlimited)
     #[arg(long, default_value = "0", global = true)]
     pub rate_limit: u64,

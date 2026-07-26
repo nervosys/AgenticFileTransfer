@@ -43,27 +43,82 @@ fn parse_sftp_url(url: &str) -> AftResult<(String, u16, Option<String>, Option<S
     Ok((host, port, user, pass, path))
 }
 
-// Minimal SSH client handler for russh.
+// SSH client handler for russh, implementing trust-on-first-use (TOFU) host-key
+// verification against `~/.ssh/known_hosts`.
 //
 // russh 0.62's `client::Handler` is a native async-fn-in-trait (it only wears
 // `#[async_trait]` when russh's `async-trait` feature is on, which we do not
 // enable), so this impl uses a plain `async fn` and must NOT carry the
 // `#[async_trait]` attribute — that would rewrite it to a boxed future and no
 // longer match the trait.
-struct SshHandler;
+//
+// The handler carries the host/port so `check_server_key` can look the peer up
+// in known_hosts; russh calls that method during the handshake with the key the
+// server actually presented.
+struct SshHandler {
+    host: String,
+    port: u16,
+}
 
 impl client::Handler for SshHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // WARNING: Host key verification is not yet implemented.
-        // This is equivalent to StrictHostKeyChecking=no and is vulnerable to MITM.
-        // TODO(security): implement known_hosts checking (~/.ssh/known_hosts)
-        eprintln!("\x1b[33mWARNING: SSH host key verification is disabled — MITM risk\x1b[0m");
-        Ok(true)
+        use russh::keys::known_hosts::{check_known_hosts, learn_known_hosts};
+        use russh::keys::Error as KeysError;
+
+        match check_known_hosts(&self.host, self.port, server_public_key) {
+            // Known host and the key matches what we recorded — accept.
+            Ok(true) => Ok(true),
+            // Host not in known_hosts yet: trust on first use. Pin the key so a
+            // later substitution is caught, and warn that this first contact is
+            // unverified.
+            Ok(false) => {
+                match learn_known_hosts(&self.host, self.port, server_public_key) {
+                    Ok(()) => {
+                        eprintln!(
+                            "\x1b[33mwarning: unknown SSH host {}:{} — pinned its key to \
+                             known_hosts (trust-on-first-use)\x1b[0m",
+                            self.host, self.port
+                        );
+                        Ok(true)
+                    }
+                    // Could not persist the pin (e.g. no home dir / unwritable).
+                    // Fail closed rather than silently accept an unverifiable key.
+                    Err(e) => {
+                        eprintln!(
+                            "\x1b[31merror: refusing SSH host {}:{} — could not record its key \
+                             in known_hosts: {}\x1b[0m",
+                            self.host, self.port, e
+                        );
+                        Ok(false)
+                    }
+                }
+            }
+            // The host is known but presented a DIFFERENT key. This is exactly
+            // the man-in-the-middle signature; refuse the connection.
+            Err(KeysError::KeyChanged { line }) => {
+                eprintln!(
+                    "\x1b[31mERROR: SSH host key for {}:{} does NOT match the key pinned in \
+                     known_hosts (line {}). This may be a man-in-the-middle attack — refusing. \
+                     If the host key legitimately changed, remove that line and reconnect.\x1b[0m",
+                    self.host, self.port, line
+                );
+                Ok(false)
+            }
+            // Any other error (unreadable known_hosts, no home dir, …). Fail
+            // closed: an unverifiable host key is not accepted.
+            Err(e) => {
+                eprintln!(
+                    "\x1b[31merror: SSH host-key verification failed for {}:{}: {} — refusing\x1b[0m",
+                    self.host, self.port, e
+                );
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -75,7 +130,10 @@ async fn open_sftp(
 
     let config = client::Config::default();
     let config = Arc::new(config);
-    let sh = SshHandler;
+    let sh = SshHandler {
+        host: host.clone(),
+        port,
+    };
 
     let mut session = client::connect(config, (host.as_str(), port), sh)
         .await

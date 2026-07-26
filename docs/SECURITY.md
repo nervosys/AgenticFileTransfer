@@ -371,8 +371,14 @@ used for protecting sensitive data. The autoencoder weights are static and the c
 has no formal security proof. It is marked with warnings in the code but remains
 callable via the `EncryptionMethod` enum.
 
-**Recommendation:** Gate the neural cipher behind a `--experimental-crypto` feature flag
-that is disabled by default. Add a runtime warning when selected.
+**Status (RESOLVED at the CLI):** The `aft crypto encrypt --method neural` and
+`aft crypto train` paths — and `--method hybrid`, which encrypts the bulk
+payload with the neural cipher — are now gated behind a global
+`--experimental-crypto` flag (off by default) and refuse to run without it,
+printing an actionable message pointing at `--method pqc`. When the flag is set,
+a runtime warning is emitted. Decryption is intentionally left ungated so
+existing neural-encrypted data can still be recovered. The underlying library
+function remains callable programmatically; the gate is at the CLI boundary.
 
 **Kyber1024 / KyberSlash (RESOLVED):**  
 The `pqc_kyber 0.7.1` crate had a timing side-channel (RUSTSEC-2023-0079,
