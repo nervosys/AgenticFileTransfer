@@ -210,15 +210,30 @@ The FEC transfer paths need real sockets; the e2e tests bind localhost UDP.
   `#[ignore]`d diagnostic test `overhead_under_sustained_loss`. Both gated/off by
   default (OnceLock), zero-cost when unset.
 
-  **Residual (open) findings** — variance is reduced but not gone; the outlier
-  (152.8 s) traces to two effects, left as future work:
-  1. **Startup blindness.** The first blocks spray with `loss_hint=0` → zero
-     proactive repair; a heavily-hit early block (observed 100% loss on block 1)
-     eats a full-block repair round + a patience wait. A small nonzero initial
-     `loss_hint` (or carrying it across the tree) would blunt this.
-  2. **RTprop filter pollution.** Patience-delayed feedback timing leaks into the
-     pacer's RTprop windowed-min (observed climbing to ~25 s). Harmless to BtlBw
-     today, but the NeedMore path should not feed RTT samples at all.
+  **Residual findings — investigated, deliberately NOT changed** (variance is
+  reduced but not gone; a ~150 s outlier remains). Both candidate fixes were
+  built and A/B-measured on the broken regime; neither helped, so the code is
+  left as-is:
+  1. **Startup blindness.** The first window sprays with `loss_hint=0` (zero
+     proactive repair), so a heavily-hit early block eats a full repair round +
+     patience wait. A nonzero *default* `initial_loss_hint` was rejected: it
+     regresses the clean-link "zero proactive repair" guarantee, and carrying
+     the hint "across the tree" is already moot because whole-tree packing (#5)
+     folds a directory into one object (so `loss_hint` already carries across
+     all its blocks). Inherent to blind startup; mitigated by the measured-RTT
+     seed above. Left unchanged.
+  2. **RTprop filter pollution is load-bearing.** The inflated RTprop (patience
+     time leaking into `last_sent.elapsed()`, climbing to tens of seconds) looks
+     wrong, but a fix that gated the sample on `rounds == 0` and clamped RTprop
+     to ≤2 s made the broken-regime median **worse** (79 s → 101 s, with new
+     144–150 s outliers, n=5). Reason: a large `rtprop` inflates
+     `target_inflight` (BDP×2), which on a real ~400 ms path keeps enough
+     symbols in flight; clamping it starves the window below the true BDP. The
+     "pollution" is accidentally sizing the window correctly. Reverted.
+
+  Any future work here should chase a *principled* window/BDP estimate (a real
+  measured path RTT feeding `target_inflight`) rather than sanitizing RTprop in
+  isolation, and must A/B on the broken regime before landing.
 
 - **#2 — FIPS-route the FEC crypto.** The data plane's AEAD + KDF are
   centralized in `src/aftp/fec/symcrypto.rs` (`seal`/`open`/`hmac_sha256`), with
