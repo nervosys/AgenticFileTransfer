@@ -1207,9 +1207,12 @@ mod pqc_tests {
     #[test]
     fn generate_keypair_produces_valid_keys() {
         let kp = pqc::generate_keypair().unwrap();
-        // Kyber1024: public key = 1568 bytes, secret key = 3168 bytes
+        // ML-KEM-1024 (FIPS 203): encapsulation key = 1568 bytes. The `ml-kem`
+        // crate serializes the decapsulation key in its compact seed form
+        // (64-byte d‖z), from which the full key is deterministically
+        // reconstructed on load — not the 3168-byte expanded encoding.
         assert_eq!(kp.public_key.len(), 1568);
-        assert_eq!(kp.secret_key.len(), 3168);
+        assert_eq!(kp.secret_key.len(), 64);
     }
 
     #[test]
@@ -1249,7 +1252,7 @@ mod pqc_tests {
         let plaintext = b"Hello, post-quantum world! This is classified data.";
         let (kem_ct, encrypted) = pqc::encrypt(plaintext, &pub_path).unwrap();
 
-        // KEM ciphertext should be 1568 bytes for Kyber1024
+        // KEM ciphertext is 1568 bytes for ML-KEM-1024
         assert_eq!(kem_ct.len(), 1568);
         // Encrypted data should be longer than plaintext (nonce + tag overhead)
         assert!(encrypted.len() > plaintext.len());
@@ -1573,7 +1576,11 @@ mod aftp_e2e_tests {
     }
 
     fn make_client(port: u16) -> AftpClient {
+        // Localhost lab client: consent to the unauthenticated (CRC32-only) data
+        // plane so the round-trip tests exercise FEC. Production requires an
+        // explicit `--fec-insecure` on the client for this, mirroring the server.
         AftpClient::new("127.0.0.1".into(), port, None, false, false)
+            .with_unauthenticated_fec(true)
     }
 
     #[tokio::test]
@@ -1929,6 +1936,33 @@ mod aftp_e2e_tests {
         handle.abort();
     }
 
+    /// The client side of the same gate: even against a server that *does* offer
+    /// the unauthenticated data plane (`--fec-insecure`), a client that has not
+    /// opted in must refuse it and complete over the reliable path. Consent is
+    /// required on both ends, not just the server.
+    #[tokio::test]
+    async fn unauthenticated_client_refuses_fec_without_optin() {
+        let dir = TempDir::new().unwrap();
+        let content = fec_payload(2 * 1024 * 1024);
+        std::fs::write(dir.path().join("srv.bin"), &content).unwrap();
+
+        // Server offers unauthenticated FEC.
+        let port = 12666;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Client asks for --fec but does NOT consent to the unauthenticated
+        // plane (no token, no with_unauthenticated_fec). It must fall back.
+        let out = dir.path().join("srv-out.bin");
+        let client = AftpClient::new("127.0.0.1".into(), port, None, false, false).with_fec(true);
+        let n = client.download("/srv.bin", &out, None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), content);
+
+        handle.abort();
+    }
+
     /// Files below the size floor stay on the reliable path even with the data
     /// plane negotiated — the setup cost is not worth paying for them.
     #[tokio::test]
@@ -1976,6 +2010,137 @@ mod aftp_e2e_tests {
         assert_eq!(std::fs::read(served.join("pushed.bin")).unwrap(), content);
         // Staging file must not be left behind.
         assert!(!served.join("pushed.aft-tmp").exists());
+
+        handle.abort();
+    }
+
+    /// Whole-tree packing: a directory of several files (including a nested
+    /// path, an empty directory, and a zero-length file) is packed into one
+    /// FEC object — manifest in-band at the front, file bytes behind it — and
+    /// unpacked on the server into an identical tree. Exercises the Merkle
+    /// manifest, the virtual packed-stream reader, and the fail-closed unpack.
+    #[cfg_attr(debug_assertions, ignore = "too slow unoptimized; run with --release")]
+    #[tokio::test]
+    async fn fec_tree_upload_round_trips_over_udp() {
+        let dir = TempDir::new().unwrap();
+        let served = dir.path().join("served");
+        std::fs::create_dir_all(&served).unwrap();
+
+        // A source tree whose *total* clears the FEC floor even though no single
+        // file need to — the whole point of packing.
+        let src = dir.path().join("tree");
+        std::fs::create_dir_all(src.join("nested/deep")).unwrap();
+        std::fs::create_dir_all(src.join("empty")).unwrap();
+        let big = fec_payload(2 * 1024 * 1024);
+        std::fs::write(src.join("big.bin"), &big).unwrap();
+        std::fs::write(src.join("nested/a.txt"), b"the quick brown fox").unwrap();
+        std::fs::write(src.join("nested/deep/b.dat"), fec_payload(1234)).unwrap();
+        std::fs::write(src.join("nested/zero.bin"), b"").unwrap();
+
+        let port = 12662;
+        let handle = start_server(&served, port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let client = make_client(port).with_fec(true);
+        let n = client.upload_tree(&src, "/dest", None).await.unwrap();
+        assert!(n > 2 * 1024 * 1024, "packed length includes every file");
+
+        let out = served.join("dest");
+        assert_eq!(std::fs::read(out.join("big.bin")).unwrap(), big);
+        assert_eq!(
+            std::fs::read(out.join("nested/a.txt")).unwrap(),
+            b"the quick brown fox"
+        );
+        assert_eq!(
+            std::fs::read(out.join("nested/deep/b.dat")).unwrap(),
+            fec_payload(1234)
+        );
+        assert!(out.join("nested/zero.bin").is_file());
+        assert_eq!(std::fs::metadata(out.join("nested/zero.bin")).unwrap().len(), 0);
+        assert!(out.join("empty").is_dir());
+        // No staging artifacts left behind.
+        assert!(!served.join("dest.aft-tree-tmp").exists());
+
+        handle.abort();
+    }
+
+    /// The FEC data plane carried over QUIC unreliable datagrams instead of a
+    /// bare UDP socket. Same fountain symbols, same envelope crypto, different
+    /// carrier — the whole transfer (offer/accept, spray, feedback, digest)
+    /// must round-trip identically on a clean link.
+    #[cfg_attr(debug_assertions, ignore = "too slow unoptimized; run with --release")]
+    #[tokio::test]
+    async fn fec_quic_download_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let content = fec_payload(3 * 1024 * 1024);
+        std::fs::write(dir.path().join("q.bin"), &content).unwrap();
+
+        let port = 12663;
+        let handle = start_server(dir.path(), port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let out = dir.path().join("q-out.bin");
+        let client = make_client(port).with_fec_quic(true);
+        let n = client.download("/q.bin", &out, None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), content);
+
+        handle.abort();
+    }
+
+    /// Push over the QUIC-datagram data plane.
+    #[cfg_attr(debug_assertions, ignore = "too slow unoptimized; run with --release")]
+    #[tokio::test]
+    async fn fec_quic_upload_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let served = dir.path().join("served");
+        std::fs::create_dir_all(&served).unwrap();
+
+        let content = fec_payload(3 * 1024 * 1024);
+        let src = dir.path().join("q-push.bin");
+        std::fs::write(&src, &content).unwrap();
+
+        let port = 12664;
+        let handle = start_server(&served, port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let client = make_client(port).with_fec_quic(true);
+        let n = client.upload(&src, "/q-pushed.bin", None).await.unwrap();
+
+        assert_eq!(n, content.len() as u64);
+        assert_eq!(std::fs::read(served.join("q-pushed.bin")).unwrap(), content);
+
+        handle.abort();
+    }
+
+    /// Whole-tree packing carried over the QUIC-datagram plane: both #5a and #5b
+    /// engaged at once. The manifest rides in-band at the front of the packed
+    /// object, the whole thing sprayed as QUIC datagrams.
+    #[cfg_attr(debug_assertions, ignore = "too slow unoptimized; run with --release")]
+    #[tokio::test]
+    async fn fec_quic_tree_upload_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let served = dir.path().join("served");
+        std::fs::create_dir_all(&served).unwrap();
+
+        let src = dir.path().join("tree");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        let big = fec_payload(2 * 1024 * 1024);
+        std::fs::write(src.join("big.bin"), &big).unwrap();
+        std::fs::write(src.join("nested/a.txt"), b"quic tree").unwrap();
+
+        let port = 12665;
+        let handle = start_server(&served, port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let client = make_client(port).with_fec_quic(true);
+        let n = client.upload_tree(&src, "/qdest", None).await.unwrap();
+        assert!(n > 2 * 1024 * 1024);
+
+        let out = served.join("qdest");
+        assert_eq!(std::fs::read(out.join("big.bin")).unwrap(), big);
+        assert_eq!(std::fs::read(out.join("nested/a.txt")).unwrap(), b"quic tree");
 
         handle.abort();
     }

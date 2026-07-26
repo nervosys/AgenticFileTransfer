@@ -213,7 +213,7 @@ pub fn generate_schema() -> OntologySchema {
             },
             OperationSchema {
                 name: "crypto".to_string(),
-                description: "Quantum-resistant cryptographic operations (Kyber1024 + AES-256-GCM, neural network cipher)".to_string(),
+                description: "Quantum-resistant cryptographic operations (ML-KEM-1024 + AES-256-GCM, neural network cipher)".to_string(),
                 usage: "aft crypto <keygen|train|encrypt|decrypt> [options]".to_string(),
                 parameters: vec![
                     ParameterSchema { name: "action".to_string(), type_: "enum(keygen, train, encrypt, decrypt)".to_string(), required: true, description: "Cryptographic action to perform".to_string(), default: None },
@@ -221,7 +221,7 @@ pub fn generate_schema() -> OntologySchema {
                     ParameterSchema { name: "--output / -o".to_string(), type_: "string".to_string(), required: false, description: "Output file path".to_string(), default: None },
                     ParameterSchema { name: "--public-key".to_string(), type_: "string".to_string(), required: false, description: "Path to public key file (PEM)".to_string(), default: None },
                     ParameterSchema { name: "--secret-key".to_string(), type_: "string".to_string(), required: false, description: "Path to secret key file (PEM)".to_string(), default: None },
-                    ParameterSchema { name: "--cipher".to_string(), type_: "enum(kyber, neural)".to_string(), required: false, description: "Cipher to use".to_string(), default: Some("kyber".to_string()) },
+                    ParameterSchema { name: "--cipher".to_string(), type_: "enum(mlkem, neural)".to_string(), required: false, description: "Cipher to use (\"kyber\" accepted as a legacy alias for mlkem)".to_string(), default: Some("mlkem".to_string()) },
                 ],
                 returns: "CryptoResult with operation, cipher, input_size, output_size".to_string(),
             },

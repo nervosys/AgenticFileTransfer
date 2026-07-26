@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use russh::client;
-use russh_keys::key;
+use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
 use russh_sftp::client::SftpSession;
 use tokio::io::AsyncWriteExt;
 
@@ -43,16 +43,21 @@ fn parse_sftp_url(url: &str) -> AftResult<(String, u16, Option<String>, Option<S
     Ok((host, port, user, pass, path))
 }
 
-// Minimal SSH client handler for russh
+// Minimal SSH client handler for russh.
+//
+// russh 0.62's `client::Handler` is a native async-fn-in-trait (it only wears
+// `#[async_trait]` when russh's `async-trait` feature is on, which we do not
+// enable), so this impl uses a plain `async fn` and must NOT carry the
+// `#[async_trait]` attribute — that would rewrite it to a boxed future and no
+// longer match the trait.
 struct SshHandler;
 
-#[async_trait]
 impl client::Handler for SshHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &key::PublicKey,
+        _server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
         // WARNING: Host key verification is not yet implemented.
         // This is equivalent to StrictHostKeyChecking=no and is vulnerable to MITM.
@@ -91,10 +96,16 @@ async fn open_sftp(
             for key_name in &["id_ed25519", "id_rsa", "id_ecdsa"] {
                 let key_path = home.join(".ssh").join(key_name);
                 if key_path.exists() {
-                    if let Ok(key_pair) = russh_keys::load_secret_key(&key_path, None) {
+                    if let Ok(key_pair) = load_secret_key(&key_path, None) {
+                        // russh 0.62: authenticate_publickey takes a
+                        // PrivateKeyWithHashAlg (None → default/legacy hash for
+                        // RSA, ignored for other key types) and returns an
+                        // AuthResult rather than a bool.
+                        let key = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None);
                         if session
-                            .authenticate_publickey(&ssh_user, Arc::new(key_pair))
+                            .authenticate_publickey(&ssh_user, key)
                             .await
+                            .map(|r| r.success())
                             .unwrap_or(false)
                         {
                             authenticated = true;
@@ -112,7 +123,8 @@ async fn open_sftp(
             authenticated = session
                 .authenticate_password(&ssh_user, password)
                 .await
-                .map_err(|e| AftError::ConnectionFailed(format!("SSH auth: {}", e)))?;
+                .map_err(|e| AftError::ConnectionFailed(format!("SSH auth: {}", e)))?
+                .success();
         }
     }
 

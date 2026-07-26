@@ -56,10 +56,9 @@
 //! At 46 bytes encrypted (22 unauthenticated) an envelope leaves 1350 bytes of
 //! symbol in a 1400-byte datagram — 96.4% efficiency.
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Nonce};
 use rand::RngCore;
 
+use super::symcrypto;
 use crate::error::{AftError, AftResult};
 
 /// Envelope magic — distinct from the control plane's `0xAF 0x54` so a
@@ -171,22 +170,12 @@ impl Envelope {
                 rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
                 out.extend_from_slice(&nonce_bytes);
 
-                let cipher = Aes256Gcm::new_from_slice(k)
-                    .map_err(|e| AftError::Other(format!("FEC cipher key: {}", e)))?;
                 // AAD = the 18-byte prefix, so the header is authenticated even
                 // though it is not encrypted. `out` currently holds
                 // prefix || nonce; the prefix is its first HEADER_PREFIX_LEN
                 // bytes.
                 let aad = out[..HEADER_PREFIX_LEN].to_vec();
-                let sealed = cipher
-                    .encrypt(
-                        Nonce::from_slice(&nonce_bytes),
-                        Payload {
-                            msg: &self.payload,
-                            aad: &aad,
-                        },
-                    )
-                    .map_err(|_| AftError::Other("FEC symbol encryption failed".to_string()))?;
+                let sealed = symcrypto::seal(k, &nonce_bytes, &aad, &self.payload)?;
                 out.extend_from_slice(&sealed);
                 Ok(out)
             }
@@ -269,19 +258,7 @@ impl Envelope {
                 let nonce = &buf[HEADER_PREFIX_LEN..ENC_HEADER_LEN];
                 let sealed = &buf[ENC_HEADER_LEN..]; // ciphertext || tag
 
-                let cipher = Aes256Gcm::new_from_slice(k)
-                    .map_err(|e| AftError::Other(format!("FEC cipher key: {}", e)))?;
-                let payload = cipher
-                    .decrypt(
-                        Nonce::from_slice(nonce),
-                        Payload {
-                            msg: sealed,
-                            aad: prefix,
-                        },
-                    )
-                    .map_err(|_| {
-                        AftError::Other("FEC symbol authentication failed".to_string())
-                    })?;
+                let payload = symcrypto::open(k, nonce, prefix, sealed)?;
 
                 Ok(Self {
                     session_id,

@@ -64,6 +64,13 @@ pub struct ProtocolOptions {
     /// Safe to leave on: it is negotiated, and a peer that does not support it
     /// simply omits the capability and the transfer uses the reliable path.
     pub fec: bool,
+    /// Prefer QUIC unreliable datagrams for the FEC data plane (implies `fec`).
+    /// Negotiated via `CAP_FEC_QUIC`; falls back to a UDP socket otherwise.
+    pub fec_quic: bool,
+    /// Consent to run the FEC data plane unauthenticated (CRC32-only symbols).
+    /// The client counterpart to the server's `--fec-insecure`; without it an
+    /// unauthenticated FEC offer is refused and the reliable path is used.
+    pub fec_allow_unauthenticated: bool,
 }
 
 /// Trait defining the interface for all protocol handlers.

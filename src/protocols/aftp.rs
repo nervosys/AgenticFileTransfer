@@ -23,6 +23,24 @@ impl AftpHandler {
     pub fn new(scheme: String) -> Self {
         Self { scheme }
     }
+
+    /// Push a whole local directory tree to `url` as one fountain-coded packed
+    /// object (see [`AftpClient::upload_tree`]). This is *not* part of the
+    /// generic `ProtocolHandler` trait — it is AFTP-specific and reachable only
+    /// when the caller has opted into the FEC data plane (`--fec`), because
+    /// tree packing has no reliable fallback. Returns the packed byte count.
+    #[allow(clippy::type_complexity)]
+    pub async fn upload_tree(
+        &self,
+        source: &Path,
+        url: &str,
+        opts: &ProtocolOptions,
+        progress: Option<Box<dyn Fn(u64, Option<u64>) + Send + Sync>>,
+    ) -> AftResult<u64> {
+        let (client, path) = make_client(url, opts)?;
+        let cb = progress.as_deref();
+        client.upload_tree(source, &path, cb).await
+    }
 }
 
 fn make_client(url: &str, opts: &ProtocolOptions) -> AftResult<(AftpClient, String)> {
@@ -34,7 +52,9 @@ fn make_client(url: &str, opts: &ProtocolOptions) -> AftResult<(AftpClient, Stri
         use_tls,
         opts.insecure,
     )
-    .with_fec(opts.fec);
+    .with_fec(opts.fec)
+    .with_fec_quic(opts.fec_quic)
+    .with_unauthenticated_fec(opts.fec_allow_unauthenticated);
     Ok((client, path))
 }
 

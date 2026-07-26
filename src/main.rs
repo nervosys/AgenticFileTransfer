@@ -336,7 +336,6 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
             tls_key,
             rate_limit: _,
             max_connections,
-            fec_insecure,
             transport,
         } => {
             let transport_type: aftp::transport::TransportType = transport
@@ -362,7 +361,7 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
                 tls_key.clone(),
                 *max_connections,
             )
-            .with_unauthenticated_fec(*fec_insecure);
+            .with_unauthenticated_fec(cli.fec_insecure);
             server.run().await?;
             Ok(OutputResult::success("serve"))
         }
@@ -407,7 +406,9 @@ fn build_opts(
         timeout_secs: cli.timeout,
         insecure: cli.insecure,
         max_redirects: max_redirects.unwrap_or(10),
-        fec: cli.fec,
+        fec: cli.fec || cli.fec_quic,
+        fec_quic: cli.fec_quic,
+        fec_allow_unauthenticated: cli.fec_insecure,
         ..Default::default()
     };
 
@@ -697,6 +698,47 @@ async fn cmd_copy(
     // Recursive directory copy
     if recursive && src_handler.scheme() == "file" && dst_handler.scheme() == "file" {
         return recursive_local_copy(source, destination, &config, format).await;
+    }
+
+    // Whole-tree packing over the fountain data plane. When the user has opted
+    // into `--fec` and is pushing a local directory to an AFTP server, pack the
+    // entire tree into one FEC object (Merkle manifest in-band, file bytes
+    // behind it) rather than negotiating a separate transfer per file. A tree of
+    // many small files then gets the data plane's loss tolerance that per-file
+    // transfers — each below the 1 MiB FEC floor — would never see. This has no
+    // reliable fallback, so it engages only on an explicit `--fec`; without it,
+    // the ordinary per-file sync path below is used unchanged.
+    if recursive
+        && opts.fec
+        && src_handler.scheme() == "file"
+        && matches!(dst_handler.scheme(), "aftp" | "aftps")
+        && Path::new(source).is_dir()
+    {
+        let handler = protocols::aftp::AftpHandler::new(dst_handler.scheme().to_string());
+        match handler.upload_tree(Path::new(source), destination, &opts, None).await {
+            Ok(bytes) => {
+                let mut out = OutputResult::success("Copy");
+                out.source = Some(source.to_string());
+                out.destination = Some(destination.to_string());
+                out.transfer = Some(engine::TransferResult {
+                    bytes_transferred: bytes,
+                    duration_ms: 0,
+                    throughput_bytes_per_sec: 0.0,
+                    checksum: None,
+                    retries_used: 0,
+                    chunks_used: 0,
+                });
+                return Ok(out);
+            }
+            Err(e) => {
+                // Surface the failure rather than silently degrading: the user
+                // asked for the data plane explicitly.
+                let mut out = OutputResult::failure("Copy", &e.to_string());
+                out.source = Some(source.to_string());
+                out.destination = Some(destination.to_string());
+                return Ok(out);
+            }
+        }
     }
 
     // Recursive copy to a remote destination. Previously this fell through to
@@ -1175,7 +1217,7 @@ async fn cmd_crypto(action: &cli::CryptoAction) -> AftResult<OutputResult> {
 
             let mut out = OutputResult::success("Crypto Keygen");
             out.source = Some(format!(
-                "Kyber1024 keypair: {} ({} bytes) + {} ({} bytes)",
+                "ML-KEM-1024 keypair: {} ({} bytes) + {} ({} bytes)",
                 pub_path.display(),
                 kp.public_key.len(),
                 sec_path.display(),

@@ -68,6 +68,13 @@ pub const FRAME_FEC_ACCEPT: u8 = 0x17;
 pub const FRAME_FEC_NEEDMORE: u8 = 0x18;
 /// Receiver → sender: a block decoded and verified; release its buffers.
 pub const FRAME_FEC_BLOCK_OK: u8 = 0x19;
+/// Sender → receiver: this FEC object is a *packed directory tree*, not a
+/// single file. A one-byte marker (payload = format version) sent just before
+/// the offer; the manifest itself rides in-band at the front of the packed
+/// stream, so it is not bounded by any control-frame size limit. Seeing this,
+/// the receiver stages the packed object and unpacks it into a tree rather than
+/// renaming it into a single file.
+pub const FRAME_FEC_TREE: u8 = 0x1A;
 
 // Flags
 pub const FLAG_COMPRESSED: u8 = 0x01;
@@ -91,6 +98,14 @@ pub const CAP_CRC32_FRAMES: u32 = 0x20;
 /// Negotiation is fail-safe: when either side omits this bit the transfer uses
 /// the ordinary reliable frame path, so v1 and v2 peers interoperate.
 pub const CAP_FEC: u32 = 0x40;
+
+/// Peer can carry the FEC data plane over QUIC unreliable datagrams instead of
+/// a bare UDP socket. Negotiated on top of [`CAP_FEC`]: when both ends advertise
+/// it *and* the client opts in, fountain symbols ride a QUIC connection (one
+/// port, one NAT binding, connection IDs) rather than a fresh UDP flow. When
+/// either side omits it, the data plane falls back to UDP — same symbols, same
+/// crypto, different carrier.
+pub const CAP_FEC_QUIC: u32 = 0x80;
 
 // Defaults
 pub const DEFAULT_PORT: u16 = 2600;

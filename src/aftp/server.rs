@@ -552,7 +552,7 @@ async fn handle_hello_handshake<R, W>(
     writer: &mut BufWriter<W>,
     hello_frame: &Frame,
     addr: SocketAddr,
-) -> AftResult<(bool, bool, u32, String, bool)>
+) -> AftResult<(bool, bool, u32, String, bool, bool)>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
@@ -682,9 +682,18 @@ where
         }
     }
 
+    // QUIC datagrams for the data plane require the base FEC plane; if FEC was
+    // refused (unsupported or unauthenticated), QUIC goes with it. Otherwise the
+    // client's CAP_FEC_QUIC bit survives the intersection — this server can
+    // always carry the plane over a self-signed QUIC connection.
+    if agreed_caps & CAP_FEC == 0 {
+        agreed_caps &= !CAP_FEC_QUIC;
+    }
+
     let use_compression = agreed_caps & CAP_COMPRESSION != 0;
     let use_crc32 = agreed_caps & CAP_CRC32_FRAMES != 0;
     let use_fec = agreed_caps & CAP_FEC != 0;
+    let use_fec_quic = agreed_caps & CAP_FEC_QUIC != 0;
 
     // Create a resumable session
     let session_id = {
@@ -697,7 +706,14 @@ where
     writer.flush().await?;
 
     let max_payload = state.max_frame_size + 1024;
-    Ok((use_compression, use_crc32, max_payload, session_id, use_fec))
+    Ok((
+        use_compression,
+        use_crc32,
+        max_payload,
+        session_id,
+        use_fec,
+        use_fec_quic,
+    ))
 }
 
 /// Handle a RESUME handshake: look up the session, verify ownership, and send
@@ -791,7 +807,7 @@ where
     // ── Handshake (HELLO or RESUME) ─────────────────────────────────────
     let first_frame = read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?;
 
-    let (use_compression, use_crc32, max_payload, session_id, use_fec) = match first_frame
+    let (use_compression, use_crc32, max_payload, session_id, use_fec, use_fec_quic) = match first_frame
         .frame_type
     {
         FRAME_HELLO => {
@@ -802,7 +818,7 @@ where
         FRAME_RESUME => {
             let (c, r, m, s) =
                 handle_resume_handshake(&state, &mut writer, &first_frame, addr).await?;
-            (c, r, m, s, false)
+            (c, r, m, s, false, false)
         }
         _ => {
             send_error(&mut writer, ERR_INVALID_REQUEST, "Expected HELLO or RESUME").await?;
@@ -813,6 +829,13 @@ where
     };
 
     // ── Request loop ────────────────────────────────────────────────────
+    // The client sends its first command immediately after our HELLO_ACK, so
+    // the gap from here to that frame arriving is one control-plane round trip —
+    // a real RTT sample we can hand to the FEC receiver to seed its patience
+    // timer, instead of a fixed guess that is 4× too low on a high-latency path.
+    // Only the first command qualifies; later frames are separated by real work.
+    let after_handshake = std::time::Instant::now();
+    let mut first_cmd = true;
     let idle_timeout = std::time::Duration::from_secs(CONNECTION_IDLE_TIMEOUT_SECS);
     loop {
         let frame =
@@ -834,6 +857,15 @@ where
                 }
             };
 
+        // The RTT sample is only meaningful for the first command on the
+        // connection (see above); take it once, then leave it None.
+        let ctrl_rtt = if first_cmd {
+            first_cmd = false;
+            Some(after_handshake.elapsed())
+        } else {
+            None
+        };
+
         match frame.frame_type {
             FRAME_GET => {
                 handle_get(
@@ -845,6 +877,7 @@ where
                     use_crc32,
                     addr,
                     use_fec,
+                    use_fec_quic,
                     &session_id,
                 )
                 .await?;
@@ -863,6 +896,8 @@ where
                     addr,
                     &session_id,
                     use_fec,
+                    use_fec_quic,
+                    ctrl_rtt,
                 )
                 .await?;
             }
@@ -905,16 +940,134 @@ async fn recv_put_fec<R, W>(
     final_path: &std::path::Path,
     addr: SocketAddr,
     verbose: bool,
+    use_fec_quic: bool,
     auth_token: Option<&str>,
+    ctrl_rtt: Option<std::time::Duration>,
 ) -> AftResult<u64>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    use super::fec::transfer::{recv_object_into, FecParams, Feedback, FileBlockWriter, DEFAULT_WINDOW};
-    use super::fec::udp::DataPlane;
-
     let offer = parse_fec_offer(&offer_frame.payload)?;
+    recv_fec_object(
+        reader, writer, &offer, temp_path, addr, verbose, use_fec_quic, auth_token, ctrl_rtt,
+    )
+    .await?;
+
+    tokio::fs::rename(temp_path, final_path).await?;
+
+    write_frame(writer, &Frame::new(FRAME_PUT_ACK, build_put_ack(true))).await?;
+    writer.flush().await?;
+    Ok(offer.total_len)
+}
+
+/// Receive a whole packed directory tree over the fountain data plane and
+/// unpack it into `dest_dir`.
+///
+/// The `FRAME_FEC_TREE` marker has already been read by the PUT loop; here we
+/// read the offer, stage the packed object to a temp file exactly as the
+/// single-file path does (whole-object SHA-256 verified against the closing
+/// DATA_END), then recover the manifest from the front of that file and unpack
+/// it — re-checking every path against the destination root and every file's
+/// SHA-256 as it lands. Nothing is published until the whole object verified,
+/// so a failed or hostile transfer leaves `dest_dir` untouched.
+#[allow(clippy::too_many_arguments)]
+async fn recv_put_tree_fec<R, W>(
+    reader: &mut BufReader<R>,
+    writer: &mut BufWriter<W>,
+    temp_path: &std::path::Path,
+    dest_dir: &std::path::Path,
+    addr: SocketAddr,
+    verbose: bool,
+    use_fec_quic: bool,
+    auth_token: Option<&str>,
+    ctrl_rtt: Option<std::time::Duration>,
+) -> AftResult<u64>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use super::fec::manifest::{read_manifest_prefix, unpack_tree};
+
+    // The offer follows the tree marker on the control plane.
+    let offer_frame = read_frame(reader, INITIAL_MAX_PAYLOAD).await?;
+    if offer_frame.frame_type != FRAME_FEC_OFFER {
+        return Err(AftError::Other(format!(
+            "Expected FEC_OFFER after tree marker, got 0x{:02x}",
+            offer_frame.frame_type
+        )));
+    }
+    let offer = parse_fec_offer(&offer_frame.payload)?;
+    recv_fec_object(
+        reader, writer, &offer, temp_path, addr, verbose, use_fec_quic, auth_token, ctrl_rtt,
+    )
+    .await?;
+
+    // Recover the manifest from the front of the verified packed file, then
+    // unpack the file region behind it into the destination tree.
+    let (manifest, data_base) = read_manifest_prefix(temp_path).await?;
+    if data_base + manifest.total_len != offer.total_len {
+        let _ = tokio::fs::remove_file(temp_path).await;
+        return Err(AftError::Other(format!(
+            "tree packed length {} disagrees with offer {}",
+            data_base + manifest.total_len,
+            offer.total_len
+        )));
+    }
+    let files = match unpack_tree(temp_path, &manifest, dest_dir, data_base).await {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(temp_path).await;
+            return Err(e);
+        }
+    };
+    let _ = tokio::fs::remove_file(temp_path).await;
+
+    write_frame(writer, &Frame::new(FRAME_PUT_ACK, build_put_ack(true))).await?;
+    writer.flush().await?;
+
+    if verbose {
+        eprintln!(
+            "  {} {} FEC received tree: {} files, {} bytes into {}",
+            "*".green(),
+            addr,
+            files,
+            offer.total_len,
+            dest_dir.display()
+        );
+    }
+    Ok(offer.total_len)
+}
+
+/// Stage a packed FEC object to `temp_path` and verify it whole.
+///
+/// Shared by the single-file and whole-tree PUT receivers: derives the symbol
+/// key, accepts the data plane, runs the receive loop and feedback pump
+/// (including the finalization-race fix — await the pump so the last BlockOk
+/// reaches the sender), finishes the staging file, and verifies the closing
+/// DATA_END's byte count and SHA-256. On any failure the temp file is removed.
+/// Leaves `temp_path` as a verified packed object for the caller to commit
+/// (rename) or unpack.
+#[allow(clippy::too_many_arguments)]
+async fn recv_fec_object<R, W>(
+    reader: &mut BufReader<R>,
+    writer: &mut BufWriter<W>,
+    offer: &super::frame::FecOfferPayload,
+    temp_path: &std::path::Path,
+    addr: SocketAddr,
+    verbose: bool,
+    use_fec_quic: bool,
+    auth_token: Option<&str>,
+    ctrl_rtt: Option<std::time::Duration>,
+) -> AftResult<super::fec::transfer::RecvStats>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use super::fec::transfer::{
+        recv_object_into, FecParams, Feedback, FileBlockWriter, SymbolSource, DEFAULT_WINDOW,
+    };
+    use super::fec::udp::DataPlane;
 
     // The client derives the symbol key from the same session id and shared
     // token, so we reconstruct it here without it ever crossing the wire.
@@ -936,8 +1089,21 @@ where
         ));
     }
 
-    let plane = DataPlane::bind_for_session("0.0.0.0:0", key, offer.session_id).await?;
-    let port = plane.local_addr()?.port();
+    // The receiver is the data-plane listener: bind a port (QUIC datagram
+    // listener or UDP socket, per negotiation), advertise it, and — for QUIC —
+    // accept the sender's connection once the port is out.
+    let mut udp_plane: Option<DataPlane> = None;
+    let mut quic_endpoint: Option<quinn::Endpoint> = None;
+    let port = if use_fec_quic {
+        let (ep, port) = super::fec::quic_dgram::bind_listener().await?;
+        quic_endpoint = Some(ep);
+        port
+    } else {
+        let udp = DataPlane::bind_for_session("0.0.0.0:0", key.clone(), offer.session_id).await?;
+        let port = udp.local_addr()?.port();
+        udp_plane = Some(udp);
+        port
+    };
 
     write_frame(
         writer,
@@ -945,6 +1111,14 @@ where
     )
     .await?;
     writer.flush().await?;
+
+    // Materialize the symbol source. For QUIC this accepts the sender's now
+    // in-flight datagram connection; for UDP the socket already listens.
+    let plane: Box<dyn SymbolSource> = if let Some(ep) = quic_endpoint.take() {
+        Box::new(super::fec::quic_dgram::accept_plane(ep, key, offer.session_id).await?)
+    } else {
+        Box::new(udp_plane.take().expect("one plane is always bound"))
+    };
 
     let params = FecParams {
         session_id: offer.session_id,
@@ -992,10 +1166,17 @@ where
     // Scoped so the receive future — and the borrows of `sink` and `fb_tx` it
     // holds — are released before we finalize either of them.
     let stats = {
-        // Initial guess only — the receiver measures the real RTT from its own
-        // NeedMore round-trips and adapts its patience as it learns.
-        let rtt = std::time::Duration::from_millis(50);
-        let recv_fut = recv_object_into(&plane, &mut sink, &fb_tx, &params, rtt);
+        // Seed the receiver's patience from the control-plane RTT the request
+        // loop measured (HELLO_ACK → first command), not a fixed guess. The
+        // receiver still adapts from its own NeedMore round-trips; starting near
+        // the real RTT avoids premature repair asks on a high-latency path
+        // before that adaptation converges. Clamp to a sane band, and fall back
+        // to the old default if no sample was taken (e.g. a resumed session).
+        let rtt = ctrl_rtt.unwrap_or(std::time::Duration::from_millis(50)).clamp(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(500),
+        );
+        let recv_fut = recv_object_into(&*plane, &mut sink, &fb_tx, &params, rtt);
         tokio::pin!(recv_fut);
 
         loop {
@@ -1069,11 +1250,6 @@ where
         }
     }
 
-    tokio::fs::rename(temp_path, final_path).await?;
-
-    write_frame(writer, &Frame::new(FRAME_PUT_ACK, build_put_ack(true))).await?;
-    writer.flush().await?;
-
     if verbose {
         eprintln!(
             "  {} {} FEC received {} bytes ({} symbols, {} rejected)",
@@ -1085,7 +1261,7 @@ where
         );
     }
 
-    Ok(offer.total_len)
+    Ok(stats)
 }
 
 // ── FEC GET handler ─────────────────────────────────────────────────────────
@@ -1095,6 +1271,7 @@ where
 /// Control plane carries the offer, the accept, and per-block feedback; the
 /// file bytes travel as UDP symbols. Blocks are read from disk one window at a
 /// time, so serving a 5 GB file costs the same memory as serving 50 MB.
+#[allow(clippy::too_many_arguments)]
 async fn serve_get_fec<R, W>(
     state: &ServerState,
     reader: &mut BufReader<R>,
@@ -1102,13 +1279,16 @@ async fn serve_get_fec<R, W>(
     path: &std::path::Path,
     file_size: u64,
     addr: SocketAddr,
+    use_fec_quic: bool,
     session_id: &str,
 ) -> AftResult<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    use super::fec::transfer::{send_blocks, FecParams, Feedback, FileBlocks, DEFAULT_WINDOW};
+    use super::fec::transfer::{
+        send_blocks, FecParams, Feedback, FileBlocks, SymbolSink, DEFAULT_WINDOW,
+    };
     use super::fec::udp::DataPlane;
 
     // A random numeric id for this transfer, sent to the client in the offer
@@ -1120,7 +1300,17 @@ where
     let key = super::fec::derive_symbol_key(state.auth_token.as_deref(), numeric_session);
     let authenticated = key.is_some();
 
-    let symbol_size = super::fec::max_symbol_size(super::fec::DEFAULT_MTU, authenticated);
+    // A QUIC datagram is smaller than the UDP MTU; size symbols to the QUIC
+    // floor when the plane will ride datagrams (both ends compute this the same
+    // way from the negotiated flag, so the offer and decoder agree).
+    let symbol_size = if use_fec_quic {
+        super::fec::quic_dgram::max_symbol_size_for(
+            super::fec::quic_dgram::QUIC_DATAGRAM_MTU as usize,
+            authenticated,
+        )
+    } else {
+        super::fec::max_symbol_size(super::fec::DEFAULT_MTU, authenticated)
+    };
     let block_size = super::fec::DEFAULT_BLOCK_SIZE as u32;
     let blocks = super::fec::block_count(file_size, block_size as usize);
 
@@ -1157,11 +1347,16 @@ where
         )));
     }
 
-    // Spray at the client's control-plane address on its chosen UDP port.
-    let plane = DataPlane::bind_for_session("0.0.0.0:0", key, numeric_session).await?;
-    plane
-        .connect(SocketAddr::new(addr.ip(), accept.udp_port))
-        .await?;
+    // The server is the data-plane connector here: dial the port the client
+    // advertised (QUIC datagram listener or UDP socket, per negotiation).
+    let peer = SocketAddr::new(addr.ip(), accept.udp_port);
+    let plane: Box<dyn SymbolSink> = if use_fec_quic {
+        Box::new(super::fec::quic_dgram::connect_plane(peer, key, numeric_session).await?)
+    } else {
+        let udp = DataPlane::bind_for_session("0.0.0.0:0", key, numeric_session).await?;
+        udp.connect(peer).await?;
+        Box::new(udp)
+    };
 
     // Feedback arrives as control frames; forward it to the scheduler.
     let (fb_tx, mut fb_rx) = tokio::sync::mpsc::channel::<Feedback>(1024);
@@ -1202,7 +1397,7 @@ where
     // per poll and keeps partial state across iterations.
     let mut assembler = FrameAssembler::new();
 
-    let send_fut = send_blocks(&blocks_reader, &plane, &mut fb_rx, &params);
+    let send_fut = send_blocks(&blocks_reader, &*plane, &mut fb_rx, &params);
     tokio::pin!(send_fut);
 
     let stats = loop {
@@ -1281,6 +1476,7 @@ async fn handle_get<R, W>(
     use_crc32: bool,
     addr: SocketAddr,
     use_fec: bool,
+    use_fec_quic: bool,
     session_id: &str,
 ) -> AftResult<()>
 where
@@ -1335,7 +1531,18 @@ where
     // already served cheaply, and small files are dominated by the setup cost.
     let whole_file = start == 0 && end + 1 >= file_size;
     if use_fec && whole_file && file_size >= super::fec::FEC_MIN_TRANSFER {
-        match serve_get_fec(state, _reader, writer, &path, file_size, addr, session_id).await {
+        match serve_get_fec(
+            state,
+            _reader,
+            writer,
+            &path,
+            file_size,
+            addr,
+            use_fec_quic,
+            session_id,
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(e) => {
                 // The client is mid-protocol and cannot be silently dropped
@@ -1494,6 +1701,8 @@ async fn handle_put<R, W>(
     addr: SocketAddr,
     session_id: &str,
     use_fec: bool,
+    use_fec_quic: bool,
+    ctrl_rtt: Option<std::time::Duration>,
 ) -> AftResult<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -1541,7 +1750,37 @@ where
                     &path,
                     addr,
                     state.verbose,
+                    use_fec_quic,
                     state.auth_token.as_deref(),
+                    ctrl_rtt,
+                )
+                .await?;
+
+                audit::log_file_access(
+                    audit::AuditEventType::FileWrite,
+                    &addr.ip().to_string(),
+                    &req.path,
+                    received,
+                );
+                return Ok(());
+            }
+            FRAME_FEC_TREE if use_fec => {
+                // A packed directory tree, not a single file. `path` is the
+                // destination directory; discard the stray single-file staging
+                // file and stage the packed object to its own temp path.
+                drop(file);
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                let tree_tmp = path.with_extension("aft-tree-tmp");
+                let received = recv_put_tree_fec(
+                    reader,
+                    writer,
+                    &tree_tmp,
+                    &path,
+                    addr,
+                    state.verbose,
+                    use_fec_quic,
+                    state.auth_token.as_deref(),
+                    ctrl_rtt,
                 )
                 .await?;
 

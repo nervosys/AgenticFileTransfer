@@ -27,6 +27,7 @@
 //! delayed feedback costs throughput, never correctness.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -35,6 +36,25 @@ use crate::error::{AftError, AftResult};
 
 use super::codec::{block_count, block_range, BlockDecoder, BlockEncoder};
 use super::pacing::{repair_symbol_count, Pacer};
+
+/// Feedback-loop tracing, gated on the `AFT_FEC_TRACE` environment variable so
+/// it costs nothing in production. When set, the scheduler narrates every
+/// loss-estimate update, repair round, and pacer state change to stderr — the
+/// raw material for diagnosing the broken-regime overhead (see `docs/HANDOFF.md`
+/// §6.3). Checked once and cached; trace points sit only at feedback events,
+/// never in the per-symbol path.
+fn fec_trace() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("AFT_FEC_TRACE").is_some())
+}
+
+macro_rules! fectrace {
+    ($($arg:tt)*) => {
+        if fec_trace() {
+            eprintln!("[fec] {}", format!($($arg)*));
+        }
+    };
+}
 
 /// Blocks in flight at once. Four 8 MiB blocks keeps a 1 Gbit × 200 ms path
 /// (a 25 MB BDP) fed while capping the working set at 32 MiB.
@@ -438,6 +458,13 @@ pub async fn send_blocks(
 
             // Proactive repair, sized to the loss we currently believe in.
             let repair_n = repair_symbol_count(src_count, loss_hint);
+            fectrace!(
+                "spray block={block_id} src={src_count} proactive_repair={repair_n} \
+                 loss_hint={loss_hint:.3} btlbw={:.0}KB/s rtprop={:?} phase={:?}",
+                pacer.btlbw() / 1000.0,
+                pacer.rtprop(),
+                pacer.phase(),
+            );
             if repair_n > 0 {
                 let symbols = match inflight.get_mut(&block_id) {
                     Some(f) => {
@@ -482,6 +509,20 @@ pub async fn send_blocks(
             }
         }
     }
+
+    let source_symbols: u64 = (0..total_blocks)
+        .map(|b| {
+            let (s, e) = block_range(b, params.block_size, params.total_len);
+            (e - s).div_ceil(params.symbol_size as u64)
+        })
+        .sum();
+    fectrace!(
+        "done blocks={total_blocks} source_symbols={source_symbols} \
+         symbols_sent={} overhead={:.3}x repair_rounds={}",
+        stats.symbols_sent,
+        stats.symbols_sent as f64 / source_symbols.max(1) as f64,
+        stats.repair_rounds,
+    );
 
     Ok(stats)
 }
@@ -532,6 +573,11 @@ async fn apply_feedback(
                 if f.rounds == 0 {
                     *loss_hint *= 0.7;
                 }
+                fectrace!(
+                    "block_ok block={block_id} rounds={} symbols_used={symbols_used} \
+                     loss_hint={loss_hint:.3}",
+                    f.rounds,
+                );
             }
         }
         Feedback::NeedMore {
@@ -574,7 +620,13 @@ async fn apply_feedback(
             if sent > 0 && symbols_received <= sent {
                 let observed = 1.0 - (symbols_received as f64 / sent as f64);
                 // Smooth it: one sample should nudge the estimate, not replace it.
+                let before = *loss_hint;
                 *loss_hint = (*loss_hint * 0.7 + observed.clamp(0.0, 0.9) * 0.3).clamp(0.0, 0.9);
+                fectrace!(
+                    "needmore block={block_id} recv={symbols_received} sent={sent} \
+                     observed_loss={observed:.3} loss_hint {before:.3}->{:.3}",
+                    *loss_hint,
+                );
             }
 
             // Overshoot the request: another round trip costs far more than a
@@ -586,6 +638,12 @@ async fn apply_feedback(
             f.repair_cursor += extra;
             f.rounds += 1;
             stats.repair_rounds += 1;
+            fectrace!(
+                "repair block={block_id} round={} needed={symbols_needed} extra={extra} \
+                 total_repair={}",
+                f.rounds,
+                f.repair_cursor,
+            );
 
             for symbol in &symbols {
                 pace_and_send(sink, block_id, symbol, pacer, stats).await?;
@@ -1043,6 +1101,44 @@ mod tests {
             "unexpected error: {}",
             err
         );
+    }
+
+    /// Diagnostic (not a pass/fail gate): report the symbol overhead the
+    /// scheduler pays under sustained loss, across several blocks so `loss_hint`
+    /// has time to adapt. Run with `AFT_FEC_TRACE=1 cargo test --release
+    /// overhead_under_sustained_loss -- --nocapture --ignored` to see the full
+    /// feedback-loop narration behind the numbers.
+    #[tokio::test]
+    #[ignore = "diagnostic: prints overhead, no assertion"]
+    async fn overhead_under_sustained_loss() {
+        // 10 blocks of 1 MiB so the loss estimator sees enough rounds to settle.
+        let block = 1024 * 1024;
+        let data = payload(10 * block);
+        for drop_one_in in [0u64, 20, 10, 5] {
+            let (out, sstats, _) = run_transfer(&data, block, drop_one_in, 0.0).await;
+            assert_eq!(out, data);
+            let source: u64 = (data.len() as u64).div_ceil(1362);
+            let loss_pct = if drop_one_in == 0 {
+                0.0
+            } else {
+                100.0 / drop_one_in as f64
+            };
+            let ideal = if drop_one_in == 0 {
+                1.0
+            } else {
+                1.0 / (1.0 - 1.0 / drop_one_in as f64)
+            };
+            eprintln!(
+                "loss={:>4.1}%  source={source}  sent={}  overhead={:.3}x  ideal={:.3}x  \
+                 excess={:.3}x  repair_rounds={}",
+                loss_pct,
+                sstats.symbols_sent,
+                sstats.symbols_sent as f64 / source as f64,
+                ideal,
+                (sstats.symbols_sent as f64 / source as f64) / ideal,
+                sstats.repair_rounds,
+            );
+        }
     }
 
     #[tokio::test]

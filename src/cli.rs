@@ -112,6 +112,21 @@ pub struct Cli {
     /// back to the reliable path against a server that does not support it.
     #[arg(long, global = true)]
     pub fec: bool,
+    /// Carry the FEC data plane over QUIC unreliable datagrams instead of a bare
+    /// UDP socket (implies --fec). One port, one NAT binding, connection IDs that
+    /// survive a path change — better reach on middlebox-heavy networks. Falls
+    /// back to UDP against a server that does not advertise it.
+    #[arg(long, global = true)]
+    pub fec_quic: bool,
+    /// Permit the FEC data plane on an *unauthenticated* connection, where
+    /// symbols carry a CRC32 only — NO encryption, NO authenticity. Trusted
+    /// lab links only; never for sensitive/CUI data. Both ends must opt in:
+    /// as a server flag it lets the server offer FEC without an auth token; as
+    /// a client flag it lets the client accept such an offer. Without it, an
+    /// unauthenticated FEC transfer is refused and falls back to the reliable
+    /// path on both sides.
+    #[arg(long, global = true)]
+    pub fec_insecure: bool,
     /// Enable turbo transfer mode: adaptive multi-stream, mmap, socket tuning
     #[arg(long, global = true)]
     pub turbo: bool,
@@ -366,13 +381,6 @@ pub enum Command {
         #[arg(long, default_value = "1000")]
         max_connections: usize,
 
-        /// Allow `--fec` on this server without an auth token, where symbols
-        /// are CRC32-protected only (NO encryption). Trusted links only —
-        /// never for sensitive/CUI data. Without this, an unauthenticated
-        /// server refuses FEC and clients fall back to the reliable path.
-        #[arg(long)]
-        fec_insecure: bool,
-
         /// Transport layer: tcp, ws (WebSocket), or quic
         #[arg(long, default_value = "tcp")]
         transport: String,
@@ -503,7 +511,7 @@ pub enum PluginAction {
 
 #[derive(Subcommand, Debug)]
 pub enum CryptoAction {
-    /// Generate a post-quantum keypair (Kyber1024 / ML-KEM)
+    /// Generate a post-quantum keypair (ML-KEM-1024, NIST FIPS 203)
     Keygen {
         /// Output file base name (creates .pub and .sec files)
         #[arg(long, short = 'o', default_value = "aft_key")]

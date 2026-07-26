@@ -48,12 +48,13 @@ zstd = "0.13"
 suppaftp = { version = "6", features = ["async-rustls"] }
 
 # SFTP/SCP support
-russh = "0.46"
-russh-sftp = "2"
-russh-keys = "0.46"
+# russh 0.52+ folded the former `russh-keys` crate in as `russh::keys`
+# (RUSTSEC-2026-0154/0153); the SFTP handler uses it via that path.
+russh = "0.62"
+russh-sftp = "2.3"
 
 # S3 support
-rust-s3 = { version = "0.35", default-features = false, features = [
+rust-s3 = { version = "0.37", default-features = false, features = [
     "tokio-rustls-tls",
 ] }
 
@@ -78,6 +79,9 @@ tokio-tungstenite = "0.24"
 
 # QUIC transport
 quinn = "0.11"
+# Zero-copy byte buffers for QUIC datagrams (the FEC QUIC data plane); already
+# in-tree transitively via quinn, pinned here as a direct dependency.
+bytes = "1"
 
 # Plugin system
 libloading = "0.8"
@@ -88,8 +92,16 @@ rand = "0.8"
 # URL encoding for cloud storage APIs
 urlencoding = "2"
 
-# Post-quantum key encapsulation (Kyber1024 — NIST FIPS 203)
-pqc_kyber = { version = "0.7", features = ["kyber1024"] }
+# Post-quantum key encapsulation: ML-KEM-1024 (NIST FIPS 203 final).
+# Replaced the unmaintained `pqc_kyber` (round-3 Kyber, KyberSlash timing
+# side-channel with no upstream fix) with RustCrypto's maintained `ml-kem`.
+# This is a deliberate algorithm change: ML-KEM-1024 keys/ciphertexts are NOT
+# interoperable with the old Kyber1024 ones, so pqc.rs bumps its key-file
+# version and rejects legacy files (regenerate with `aft keygen`).
+# `getrandom` enables the no-arg generate_keypair()/encapsulate() that use the
+# system RNG — avoids threading our rand 0.8 OsRng across ml-kem's newer
+# rand_core version boundary.
+ml-kem = { version = "0.3", features = ["getrandom"] }
 
 # AES-256-GCM authenticated encryption
 aes-gcm = "0.10"
@@ -103,8 +115,10 @@ rcgen = "0.13"
 # RaptorQ fountain coding (RFC 6330) for the AFTP FEC data plane
 raptorq = "2"
 
-# Optional: FIPS-validated crypto backend (replaces ring with aws-lc-rs)
-# Enable with: cargo build --features fips
+# Optional: FIPS 140-3 validated crypto backend. Enable with
+# `cargo build --features fips`. Selects aws-lc-rs for the rustls TLS provider
+# (server.rs) AND for the FEC data-plane AEAD/KDF (src/aftp/fec/symcrypto.rs);
+# without it those use the RustCrypto aes-gcm/hmac crates.
 aws-lc-rs = { version = "1", optional = true }
 
 # NOTE: the three dependencies above are used unconditionally by src/aftp/

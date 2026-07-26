@@ -24,7 +24,10 @@
 
 pub mod codec;
 pub mod envelope;
+pub mod manifest;
 pub mod pacing;
+pub mod quic_dgram;
+pub mod symcrypto;
 pub mod transfer;
 pub mod udp;
 
@@ -62,16 +65,18 @@ pub const FEC_MIN_TRANSFER: u64 = 1 << 20; // 1 MiB
 /// authenticity nor confidentiality, and is appropriate only on a trusted link
 /// that never carries sensitive data.
 ///
-/// FIPS note: this uses the RustCrypto `hmac`/`sha2` KDF and the `aes-gcm`
-/// cipher, the same primitives as the PQC pipeline — not the FIPS-validated TLS
-/// provider selected by `--features fips`. See `docs/SECURITY.md`.
+/// FIPS note: the KDF and the symbol AEAD both go through [`symcrypto`], which
+/// routes to the FIPS 140-3 validated `aws-lc-rs` module under `--features fips`
+/// and to the RustCrypto `hmac`/`sha2`/`aes-gcm` primitives otherwise. A FIPS
+/// build keeps the FEC data plane inside the validated boundary. See
+/// `docs/SECURITY.md`.
 pub fn derive_symbol_key(auth_token: Option<&str>, session_id: u64) -> Option<Vec<u8>> {
-    use hmac::{Hmac, Mac};
     let token = auth_token?;
-    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(token.as_bytes()).ok()?;
-    mac.update(b"aft-fec-symbol-key-v2");
-    mac.update(&session_id.to_be_bytes());
-    Some(mac.finalize().into_bytes().to_vec())
+    let key = symcrypto::hmac_sha256(
+        token.as_bytes(),
+        &[b"aft-fec-symbol-key-v2", &session_id.to_be_bytes()],
+    );
+    Some(key.to_vec())
 }
 
 /// A cryptographically random 64-bit session id for the FEC data plane.

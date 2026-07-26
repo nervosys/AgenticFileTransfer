@@ -50,6 +50,15 @@ pub struct AftpClient {
     use_challenge_auth: bool,
     /// Offer the fountain-coded data plane during the handshake.
     fec_enabled: bool,
+    /// Prefer QUIC unreliable datagrams over a bare UDP socket for the FEC data
+    /// plane. Only meaningful alongside `fec_enabled`; negotiated via
+    /// `CAP_FEC_QUIC` and falls back to UDP against a server without it.
+    fec_quic: bool,
+    /// Explicit consent to use the FEC data plane on an *unauthenticated*
+    /// connection (no auth token → CRC32-only symbols, no encryption). Without
+    /// it, the client refuses an unauthenticated FEC offer and stays on the
+    /// reliable path, even if the server advertised the data plane.
+    fec_allow_unauthenticated: bool,
 }
 
 // ── URL parsing ─────────────────────────────────────────────────────────────
@@ -107,6 +116,8 @@ impl AftpClient {
             insecure,
             use_challenge_auth: false,
             fec_enabled: false,
+            fec_quic: false,
+            fec_allow_unauthenticated: false,
         }
     }
 
@@ -128,9 +139,32 @@ impl AftpClient {
         self
     }
 
+    /// Prefer QUIC unreliable datagrams for the FEC data plane (implies
+    /// [`with_fec`](Self::with_fec)). Negotiated via `CAP_FEC_QUIC`; a server
+    /// without it falls the data plane back to a bare UDP socket.
+    #[allow(dead_code)]
+    pub fn with_fec_quic(mut self, enable: bool) -> Self {
+        self.fec_quic = enable;
+        if enable {
+            self.fec_enabled = true;
+        }
+        self
+    }
+
+    /// Consent to run the FEC data plane on an *unauthenticated* connection,
+    /// where symbols are CRC32-only (no encryption or authenticity). The
+    /// client-side counterpart to the server's `--fec-insecure`: without it,
+    /// the client refuses such a data plane and falls back to the reliable
+    /// path. Trusted lab links only; never for sensitive data.
+    #[allow(dead_code)]
+    pub fn with_unauthenticated_fec(mut self, allow: bool) -> Self {
+        self.fec_allow_unauthenticated = allow;
+        self
+    }
+
     /// Open connection and perform HELLO handshake.
     /// Returns (reader, writer, negotiated_max_frame, use_compression, use_crc32,
-    /// session_id, use_fec).
+    /// session_id, use_fec, use_fec_quic).
     async fn connect(
         &self,
     ) -> AftResult<(
@@ -140,6 +174,7 @@ impl AftpClient {
         bool,
         bool,
         String,
+        bool,
         bool,
     )> {
         let addr = format!("{}:{}", self.host, self.port);
@@ -175,8 +210,27 @@ impl AftpClient {
 
         // Send HELLO
         let mut caps = CAP_COMPRESSION | CAP_CHECKSUM | CAP_CRC32_FRAMES;
-        if self.fec_enabled {
+        // Decide FEC consent *before* advertising the capability. With no auth
+        // token the symbol key cannot be derived, so symbols would be CRC32-only
+        // — cleartext, no authenticity — and the operator must opt in
+        // (`--fec-insecure`). If we advertised CAP_FEC and then refused after the
+        // server agreed, the server would still open a data plane we won't use and
+        // strand the transfer; gating here keeps the server from ever agreeing.
+        let fec_consented =
+            self.fec_enabled && (self.auth_token.is_some() || self.fec_allow_unauthenticated);
+        if self.fec_enabled && !fec_consented {
+            eprintln!(
+                "{}",
+                "  note: refused FEC on an unauthenticated connection (symbols would be \
+                 unencrypted); use --auth-token, or --fec-insecure for a trusted link"
+                    .dimmed()
+            );
+        }
+        if fec_consented {
             caps |= CAP_FEC;
+        }
+        if fec_consented && self.fec_quic {
+            caps |= CAP_FEC_QUIC;
         }
         if self.use_challenge_auth {
             caps |= CAP_AUTH_CHALLENGE;
@@ -233,7 +287,12 @@ impl AftpClient {
         let use_crc32 = ack_data.capabilities & CAP_CRC32_FRAMES != 0;
         // Only when *both* ends advertise it; a v1 server simply omits the bit
         // and we stay on the reliable frame path.
+        // We only advertised CAP_FEC after passing the consent gate above, so a
+        // server bit here already implies a data plane we agreed to run.
         let use_fec = ack_data.capabilities & CAP_FEC != 0;
+        // QUIC datagrams require the base FEC plane too; only when both ends
+        // advertise CAP_FEC_QUIC. Otherwise the data plane stays on UDP.
+        let use_fec_quic = use_fec && (ack_data.capabilities & CAP_FEC_QUIC != 0);
         let session_id = ack_data.session_id;
 
         Ok((
@@ -244,6 +303,7 @@ impl AftpClient {
             use_crc32,
             session_id,
             use_fec,
+            use_fec_quic,
         ))
     }
 
@@ -470,7 +530,7 @@ impl AftpClient {
     // ── HEAD ────────────────────────────────────────────────────────────────
 
     pub async fn head(&self, path: &str) -> AftResult<AftpFileInfo> {
-        let (mut reader, mut writer, max_frame, _, _, _session_id, _) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _, _, _session_id, _, _) = self.connect().await?;
 
         let payload = build_head(path);
         write_frame(&mut writer, &Frame::new(FRAME_HEAD, payload)).await?;
@@ -494,17 +554,33 @@ impl AftpClient {
         dest: &Path,
         progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     ) -> AftResult<u64> {
-        let (mut reader, mut writer, max_frame, _use_compress, use_crc32, _session_id, use_fec) =
-            self.connect().await?;
+        let (
+            mut reader,
+            mut writer,
+            max_frame,
+            _use_compress,
+            use_crc32,
+            _session_id,
+            use_fec,
+            use_fec_quic,
+        ) = self.connect().await?;
 
         // Send GET (full file)
         let payload = build_get(path, 0, 0);
         write_frame(&mut writer, &Frame::new(FRAME_GET, payload)).await?;
         writer.flush().await?;
 
+        // Time the GET → HEAD_RESP exchange: one control-plane round trip,
+        // measured on this very connection right before the data plane starts.
+        // It seeds the receiver's patience timer far better than a fixed guess —
+        // a 50 ms default asks for repair after 100 ms on a 400 ms-RTT path,
+        // long before the answer to the spray can arrive, provoking spurious
+        // NeedMore rounds and inflated loss estimates. See `download_fec`.
+        let ctrl_sent = std::time::Instant::now();
         // Receive HEAD_RESP
         let head = Self::expect_frame(&mut reader, FRAME_HEAD_RESP, max_frame + 1024).await?;
         let meta = parse_head_resp(&head.payload)?;
+        let ctrl_rtt = ctrl_sent.elapsed();
 
         if let Some(parent) = dest.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
@@ -522,7 +598,16 @@ impl AftpClient {
                 ));
             }
             return self
-                .download_fec(reader, writer, &first, dest, meta.file_size, progress)
+                .download_fec(
+                    reader,
+                    writer,
+                    &first,
+                    dest,
+                    meta.file_size,
+                    use_fec_quic,
+                    ctrl_rtt,
+                    progress,
+                )
                 .await;
         }
 
@@ -608,13 +693,113 @@ impl AftpClient {
     /// costs the same memory as pushing 50 MB.
     async fn upload_fec(
         &self,
-        mut reader: BufReader<BoxRead>,
-        mut writer: BufWriter<BoxWrite>,
+        reader: BufReader<BoxRead>,
+        writer: BufWriter<BoxWrite>,
         source: &Path,
         file_size: u64,
+        use_fec_quic: bool,
         progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     ) -> AftResult<u64> {
-        use super::fec::transfer::{send_blocks, FecParams, Feedback, FileBlocks, DEFAULT_WINDOW};
+        use super::fec::transfer::FileBlocks;
+        let blocks = FileBlocks::new(source.to_path_buf(), 0);
+        self.spray_fec_object(reader, writer, &blocks, file_size, false, use_fec_quic, progress)
+            .await
+    }
+
+    /// Push a whole directory tree over the fountain data plane as one packed
+    /// object. The tree is walked into a Merkle manifest ([`super::fec::manifest`]),
+    /// the manifest rides at the front of the packed stream, and the file bytes
+    /// follow — all sprayed by the same scheduler a single file uses, so a tree
+    /// of many small files gets the data plane's loss tolerance that per-file
+    /// transfers (each below the FEC floor) would never see.
+    ///
+    /// Requires the FEC data plane to be negotiated: tree packing has no reliable
+    /// fallback of its own (callers wanting one decompose the tree file by file).
+    pub async fn upload_tree(
+        &self,
+        source: &Path,
+        remote_path: &str,
+        progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    ) -> AftResult<u64> {
+        use super::fec::manifest::{build_manifest, manifest_prefix, PackedTreeReader};
+
+        let built = build_manifest(source).await?;
+        let manifest = built.manifest;
+        if built.symlinks_skipped > 0 {
+            eprintln!(
+                "  note: skipped {} symlink(s) — links are not packed across the transfer",
+                built.symlinks_skipped
+            );
+        }
+        let prefix = manifest_prefix(&manifest);
+        let reader_blocks = PackedTreeReader::new(source.to_path_buf(), &manifest, prefix);
+        let total_len = reader_blocks.total_len();
+
+        let (
+            mut reader,
+            mut writer,
+            _max_frame,
+            _use_compress,
+            _use_crc32,
+            _session_id,
+            use_fec,
+            use_fec_quic,
+        ) = self.connect().await?;
+        if !use_fec {
+            return Err(AftError::Other(
+                "Whole-tree packing requires the FEC data plane, which this server did not negotiate"
+                    .into(),
+            ));
+        }
+
+        // Announce the packed object with a PUT to the destination directory,
+        // then hand off to the shared FEC spray (which sends the tree marker
+        // and the offer). The declared size is the whole packed length.
+        let payload = build_put(remote_path, total_len);
+        write_frame(&mut writer, &Frame::new(FRAME_PUT, payload)).await?;
+        writer.flush().await?;
+
+        let ack = Self::expect_frame(&mut reader, FRAME_PUT_ACK, INITIAL_MAX_PAYLOAD).await?;
+        let ack_data = parse_put_ack(&ack.payload)?;
+        if ack_data.complete {
+            return Err(AftError::Other(
+                "Server sent complete-ACK before tree transfer".into(),
+            ));
+        }
+
+        self.spray_fec_object(
+            reader,
+            writer,
+            &reader_blocks,
+            total_len,
+            true,
+            use_fec_quic,
+            progress,
+        )
+        .await
+    }
+
+    /// Shared core for pushing an object over the fountain data plane, used by
+    /// both single-file (`upload_fec`) and whole-tree (`upload_tree`) pushes.
+    ///
+    /// `blocks` supplies the packed bytes on demand (a file, or the virtual
+    /// packed-tree stream), so sender memory stays bounded by the window. When
+    /// `is_tree` is set a one-byte tree marker precedes the offer, telling the
+    /// server to unpack rather than rename. The closing DATA_END digest is
+    /// computed by streaming `blocks` once after the spray — a page-cache-warm
+    /// re-read that keeps peak memory at the window, not the object.
+    #[allow(clippy::too_many_arguments)]
+    async fn spray_fec_object(
+        &self,
+        mut reader: BufReader<BoxRead>,
+        mut writer: BufWriter<BoxWrite>,
+        blocks: &dyn super::fec::transfer::BlockReader,
+        total_len: u64,
+        is_tree: bool,
+        use_fec_quic: bool,
+        progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    ) -> AftResult<u64> {
+        use super::fec::transfer::{send_blocks, FecParams, Feedback, SymbolSink, DEFAULT_WINDOW};
         use super::fec::udp::DataPlane;
 
         // A random session id, sent to the server in the offer below so both
@@ -627,9 +812,32 @@ impl AftpClient {
 
         let key = super::fec::derive_symbol_key(self.auth_token.as_deref(), session_id);
         let authenticated = key.is_some();
-        let symbol_size = super::fec::max_symbol_size(super::fec::DEFAULT_MTU, authenticated);
+        // A QUIC datagram is smaller than the UDP MTU, and the offer must fix the
+        // symbol size before the QUIC path exists — so size to the conservative
+        // QUIC floor when the data plane will ride datagrams.
+        let symbol_size = if use_fec_quic {
+            super::fec::quic_dgram::max_symbol_size_for(
+                super::fec::quic_dgram::QUIC_DATAGRAM_MTU as usize,
+                authenticated,
+            )
+        } else {
+            super::fec::max_symbol_size(super::fec::DEFAULT_MTU, authenticated)
+        };
         let block_size = super::fec::DEFAULT_BLOCK_SIZE as u32;
-        let blocks = super::fec::block_count(file_size, block_size as usize);
+        let blocks_n = super::fec::block_count(total_len, block_size as usize);
+
+        // A tree push announces itself before the offer so the server routes to
+        // its unpacking receiver.
+        if is_tree {
+            write_frame(
+                &mut writer,
+                &Frame::new(
+                    FRAME_FEC_TREE,
+                    vec![super::fec::manifest::MANIFEST_VERSION],
+                ),
+            )
+            .await?;
+        }
 
         write_frame(
             &mut writer,
@@ -637,10 +845,10 @@ impl AftpClient {
                 FRAME_FEC_OFFER,
                 build_fec_offer(
                     session_id,
-                    file_size,
+                    total_len,
                     block_size,
                     symbol_size,
-                    blocks,
+                    blocks_n,
                     authenticated,
                 ),
             ),
@@ -657,23 +865,33 @@ impl AftpClient {
             )));
         }
 
-        let plane = DataPlane::bind_for_session("0.0.0.0:0", key, session_id).await?;
+        // Resolve the server so we can dial its data-plane port (UDP socket or
+        // QUIC listener, per negotiation).
         let server_ip: std::net::IpAddr = tokio::net::lookup_host((self.host.as_str(), self.port))
             .await
             .ok()
             .and_then(|mut it| it.next())
             .map(|a| a.ip())
             .ok_or_else(|| AftError::Other(format!("Cannot resolve {}", self.host)))?;
-        plane
-            .connect(std::net::SocketAddr::new(server_ip, accept.udp_port))
-            .await?;
+        let peer = std::net::SocketAddr::new(server_ip, accept.udp_port);
+
+        // The sender is always the data-plane *connector*: it dials the port the
+        // receiver advertised in the accept. Over QUIC that is a datagram
+        // connection; over UDP a connected socket. Both implement `SymbolSink`.
+        let plane: Box<dyn SymbolSink> = if use_fec_quic {
+            Box::new(super::fec::quic_dgram::connect_plane(peer, key, session_id).await?)
+        } else {
+            let udp = DataPlane::bind_for_session("0.0.0.0:0", key, session_id).await?;
+            udp.connect(peer).await?;
+            Box::new(udp)
+        };
 
         // Feedback arrives as control frames while we spray.
         let (fb_tx, mut fb_rx) = tokio::sync::mpsc::channel::<Feedback>(1024);
 
         let params = FecParams {
             session_id,
-            total_len: file_size,
+            total_len,
             block_size: block_size as usize,
             symbol_size,
             window: DEFAULT_WINDOW,
@@ -696,8 +914,7 @@ impl AftpClient {
             reader
         });
 
-        let blocks_reader = FileBlocks::new(source.to_path_buf(), 0);
-        let send_fut = send_blocks(&blocks_reader, &plane, &mut fb_rx, &params);
+        let send_fut = send_blocks(blocks, &*plane, &mut fb_rx, &params);
         tokio::pin!(send_fut);
 
         loop {
@@ -740,19 +957,19 @@ impl AftpClient {
             }
         }
 
-        // Hash the file for the closing DATA_END. Reading it again hits the
-        // page cache rather than the disk, and keeps peak memory bounded by
-        // the window instead of the file.
+        // Digest the whole packed object for the closing DATA_END by streaming
+        // it back through the same reader. For a file this re-reads it (page
+        // cache warm); for a tree it re-reads the manifest prefix and files.
+        // Either way peak memory stays at one block.
         let digest = {
-            let mut f = tokio::fs::File::open(source).await?;
             let mut hasher = sha2::Sha256::new();
-            let mut buf = vec![0u8; 1 << 20];
-            loop {
-                let n = tokio::io::AsyncReadExt::read(&mut f, &mut buf).await?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
+            let mut pos = 0u64;
+            let chunk = block_size as u64;
+            while pos < total_len {
+                let want = chunk.min(total_len - pos) as usize;
+                let bytes = blocks.read_block(pos, want).await?;
+                hasher.update(&bytes);
+                pos += want as u64;
             }
             hasher.finalize()
         };
@@ -761,7 +978,7 @@ impl AftpClient {
             &mut writer,
             &Frame::new(
                 FRAME_DATA_END,
-                build_data_end(file_size, CHECKSUM_SHA256, &digest),
+                build_data_end(total_len, CHECKSUM_SHA256, &digest),
             ),
         )
         .await?;
@@ -796,9 +1013,9 @@ impl AftpClient {
         }
 
         if let Some(cb) = &progress {
-            cb(file_size, Some(file_size));
+            cb(total_len, Some(total_len));
         }
-        Ok(file_size)
+        Ok(total_len)
     }
 
     // ── FEC DOWNLOAD ────────────────────────────────────────────────────────
@@ -812,6 +1029,7 @@ impl AftpClient {
     /// Nothing is written to `dest` until every block has decoded and the
     /// whole-file digest matches, so an aborted or corrupted transfer cannot
     /// leave partial data behind.
+    #[allow(clippy::too_many_arguments)]
     async fn download_fec(
         &self,
         mut reader: BufReader<BoxRead>,
@@ -819,10 +1037,12 @@ impl AftpClient {
         offer_frame: &Frame,
         dest: &Path,
         declared_size: u64,
+        use_fec_quic: bool,
+        ctrl_rtt: std::time::Duration,
         progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     ) -> AftResult<u64> {
         use super::fec::transfer::{
-            recv_object_into, FecParams, Feedback, FileBlockWriter, DEFAULT_WINDOW,
+            recv_object_into, FecParams, Feedback, FileBlockWriter, SymbolSource, DEFAULT_WINDOW,
         };
         use super::fec::udp::DataPlane;
 
@@ -841,9 +1061,23 @@ impl AftpClient {
             ));
         }
 
-        // Bind an ephemeral UDP port and tell the server where to spray.
-        let plane = DataPlane::bind_for_session("0.0.0.0:0", key, offer.session_id).await?;
-        let port = plane.local_addr()?.port();
+        // The receiver is the data-plane *listener*: it binds a port and puts it
+        // in the accept for the sender to dial. Over QUIC that is a datagram
+        // listener whose incoming connection is accepted once the port is out;
+        // over UDP a connectionless socket. Bind (and learn the port) before
+        // sending the accept either way.
+        let mut udp_plane: Option<DataPlane> = None;
+        let mut quic_endpoint: Option<quinn::Endpoint> = None;
+        let port = if use_fec_quic {
+            let (ep, port) = super::fec::quic_dgram::bind_listener().await?;
+            quic_endpoint = Some(ep);
+            port
+        } else {
+            let udp = DataPlane::bind_for_session("0.0.0.0:0", key.clone(), offer.session_id).await?;
+            let port = udp.local_addr()?.port();
+            udp_plane = Some(udp);
+            port
+        };
 
         write_frame(
             &mut writer,
@@ -908,12 +1142,30 @@ impl AftpClient {
             tokio::fs::create_dir_all(parent).await.ok();
         }
 
-        // Initial guess only — the receiver measures the real RTT from its own
-        // NeedMore round-trips and adapts its patience as it learns.
-        let rtt = std::time::Duration::from_millis(50);
+        // Materialize the symbol source. For QUIC this accepts the sender's now
+        // in-flight datagram connection (the accept went out above, so the peer
+        // is dialing); for UDP the socket is already listening.
+        let plane: Box<dyn SymbolSource> = if let Some(ep) = quic_endpoint.take() {
+            Box::new(super::fec::quic_dgram::accept_plane(ep, key, offer.session_id).await?)
+        } else {
+            Box::new(udp_plane.take().expect("one plane is always bound"))
+        };
+
+        // Seed the receiver's patience from the control-plane RTT we just
+        // measured (GET → HEAD_RESP), not a fixed guess. The receiver still
+        // adapts from its own NeedMore round-trips, but starting near the real
+        // RTT avoids a burst of premature repair asks on a high-latency path
+        // before that adaptation converges. Clamp to a sane band: never below
+        // the old 50 ms default (a sub-millisecond LAN measurement should not
+        // make us ask for repair on a scheduler hiccup), never so high that the
+        // first repair round waits seconds on a fluke reading.
+        let rtt = ctrl_rtt.clamp(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(500),
+        );
         let recv_result = match FileBlockWriter::create(&tmp, offer.total_len).await {
             Ok(mut sink) => {
-                let r = recv_object_into(&plane, &mut sink, &fb_tx, &params, rtt).await;
+                let r = recv_object_into(&*plane, &mut sink, &fb_tx, &params, rtt).await;
                 if r.is_ok() {
                     let _ = sink.finish().await;
                 }
@@ -990,7 +1242,7 @@ impl AftpClient {
     // ── DOWNLOAD RANGE ──────────────────────────────────────────────────────
 
     pub async fn download_range(&self, path: &str, start: u64, end: u64) -> AftResult<Vec<u8>> {
-        let (mut reader, mut writer, max_frame, _, use_crc32, _session_id, _) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _, use_crc32, _session_id, _, _) = self.connect().await?;
 
         let payload = build_get(path, start, end);
         write_frame(&mut writer, &Frame::new(FRAME_GET, payload)).await?;
@@ -1049,8 +1301,16 @@ impl AftpClient {
         let file_meta = tokio::fs::metadata(source).await?;
         let file_size = file_meta.len();
 
-        let (mut reader, mut writer, max_frame, use_compress, use_crc32, _session_id, use_fec) =
-            self.connect().await?;
+        let (
+            mut reader,
+            mut writer,
+            max_frame,
+            use_compress,
+            use_crc32,
+            _session_id,
+            use_fec,
+            use_fec_quic,
+        ) = self.connect().await?;
 
         // Send PUT request
         let payload = build_put(remote_path, file_size);
@@ -1070,7 +1330,7 @@ impl AftpClient {
         // the file is large enough to be worth the setup.
         if use_fec && file_size >= super::fec::FEC_MIN_TRANSFER {
             return self
-                .upload_fec(reader, writer, source, file_size, progress)
+                .upload_fec(reader, writer, source, file_size, use_fec_quic, progress)
                 .await;
         }
 
@@ -1157,7 +1417,7 @@ impl AftpClient {
     // ── LIST ────────────────────────────────────────────────────────────────
 
     pub async fn list(&self, path: &str) -> AftResult<Vec<AftpDirEntry>> {
-        let (mut reader, mut writer, max_frame, _, _, _session_id, _) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _, _, _session_id, _, _) = self.connect().await?;
 
         let payload = build_list(path);
         write_frame(&mut writer, &Frame::new(FRAME_LIST, payload)).await?;

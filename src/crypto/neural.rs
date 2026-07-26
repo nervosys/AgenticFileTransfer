@@ -16,7 +16,7 @@
 //!
 //! **Security note**: Neural network ciphers are an active research area.
 //! This implementation is experimental. For production DoD use, prefer
-//! the PQC (Kyber1024 + AES-256-GCM) method.
+//! the PQC (ML-KEM-1024 + AES-256-GCM) method.
 
 use std::io::Write;
 use std::path::Path;

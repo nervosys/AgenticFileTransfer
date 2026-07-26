@@ -244,9 +244,10 @@ not carry CUI. See the dedicated FEC section below.
 - No minimum TLS version configuration
 - No cipher suite restriction
 - No mTLS (mutual TLS) for client certificate authentication
-- FEC symbol crypto uses the `aes-gcm`/`hmac` RustCrypto crates (as the PQC
-  pipeline does), **not** the FIPS-validated provider selected by
-  `--features fips`, which currently covers only the TLS layer
+- FEC symbol crypto routes through `aws-lc-rs` (FIPS 140-3) under
+  `--features fips` and RustCrypto `aes-gcm`/`hmac` otherwise; a default build
+  is therefore unvalidated for the data plane (the PQC/neural pipelines remain
+  RustCrypto regardless of the feature)
 
 **Recommendations:**
 - Add `--require-tls` server option to reject unencrypted connections
@@ -316,10 +317,10 @@ if accessible. This is a deployment consideration, not a code vulnerability.
 | ------------------- | ------------------------------ | --------------------------- | ------------------------------- |
 | SHA-256             | File checksums, AFTP integrity | Yes (FIPS 180-4)            | `sha2` crate (ring backend)     |
 | SHA-512             | Optional checksum              | Yes (FIPS 180-4)            | `sha2` crate                    |
-| HMAC-SHA-256        | Challenge/response auth        | Yes (FIPS 198-1)            | `hmac` + `sha2` crates          |
+| HMAC-SHA-256        | Challenge/response auth, FEC symbol-key KDF | Yes (FIPS 198-1)            | `hmac`+`sha2`; FEC KDF via `aws-lc-rs` under `--features fips` |
 | CRC32               | Per-frame integrity (HW accel) | N/A (not crypto)            | `crc32fast` crate               |
-| AES-256-GCM         | TLS data encryption, PQC AEAD  | Yes (FIPS 197 + SP 800-38D) | via `rustls`/`ring`, `aes-gcm`  |
-| Kyber1024           | Post-quantum KEM               | **Pending** (NIST PQC)      | `pqc_kyber` crate               |
+| AES-256-GCM         | TLS data encryption, PQC AEAD, FEC symbols | Yes (FIPS 197 + SP 800-38D) | `rustls`/`ring`, `aes-gcm`; FEC via `aws-lc-rs` under `--features fips` |
+| ML-KEM-1024         | Post-quantum KEM               | Yes (FIPS 203)              | `ml-kem` crate (RustCrypto)     |
 | ChaCha20-Poly1305   | TLS alternative cipher         | Not FIPS-approved           | via `rustls` + `ring`           |
 | X25519              | TLS key exchange               | Not FIPS-approved           | via `rustls` + `ring`           |
 | ECDHE-P256/P384     | TLS key exchange               | Yes (SP 800-56A)            | via `rustls` + `ring`           |
@@ -344,9 +345,10 @@ validation (certificate #4631).
 
 **Path to Compliance:**
 
-1. **Short-term:** Build with `--features fips` to use `aws-lc-rs` backend.
-   Document current crypto usage and obtain a waiver/exception for algorithms
-   not yet FIPS-validated.
+1. **Short-term:** Build with `--features fips` to use the `aws-lc-rs` backend
+   for both TLS **and** the FEC data plane (AES-256-GCM + HMAC-SHA256, via
+   `src/aftp/fec/symcrypto.rs`). Document current crypto usage and obtain a
+   waiver/exception for algorithms not yet FIPS-validated (PQC, neural).
 
 2. **Medium-term:** Replace `ring` with `aws-lc-rs` as the default backend.
    `rustls` supports `aws-lc-rs` via the `aws-lc-rs` feature flag.
@@ -372,14 +374,14 @@ callable via the `EncryptionMethod` enum.
 **Recommendation:** Gate the neural cipher behind a `--experimental-crypto` feature flag
 that is disabled by default. Add a runtime warning when selected.
 
-**Kyber1024 (HIGH — Supply Chain):**  
-The `pqc_kyber 0.7.1` crate has a known timing side-channel vulnerability
-(RUSTSEC-2023-0079, "KyberSlash") with CVSS 7.4 HIGH severity. Division operations
-in the implementation can leak secret key material via timing observations.
-**No fix is available** — the crate is unmaintained.
-
-**Recommendation:** Monitor `pqc-kyber` for a fix or migrate to `ml-kem` crate
-(NIST's finalized ML-KEM standard) when available and audited.
+**Kyber1024 / KyberSlash (RESOLVED):**  
+The `pqc_kyber 0.7.1` crate had a timing side-channel (RUSTSEC-2023-0079,
+"KyberSlash", CVSS 7.4 HIGH) and was unmaintained. **Fixed:** the PQC pipeline
+(`src/crypto/pqc.rs`) was migrated to RustCrypto's maintained **`ml-kem` 0.3.2**
+(FIPS-203 final ML-KEM-1024). This is a deliberate algorithm change — round-3
+Kyber1024 keys/ciphertexts are not interoperable with ML-KEM-1024 — so the key
+file format version was bumped (v1→v2) and legacy files are rejected with a
+"regenerate with `aft keygen`" error.
 
 ### 3.4 Recommendations for FIPS Mode
 
@@ -392,7 +394,7 @@ rustls = { version = "0.23", features = ["aws_lc_rs"] }
 Add a `--fips` CLI flag or `FIPS_MODE=1` env var that:
 - Restricts TLS to FIPS-approved cipher suites only
 - Disables MD5 checksum algorithm
-- Disables neural cipher and Kyber1024
+- Disables the neural cipher (ML-KEM-1024 is FIPS 203 and stays enabled)
 - Uses FIPS-validated DRBG for nonce generation
 - Logs FIPS mode status on startup
 
@@ -543,13 +545,20 @@ AES-256-GCM path above.
 
 ### FIPS status
 
-The FEC symbol crypto uses the RustCrypto `aes-gcm` and `hmac`/`sha2` crates —
-the same primitives and boundary as the existing PQC/neural pipeline — **not**
-the FIPS-validated `aws-lc-rs` provider that `--features fips` selects for TLS.
-The algorithms (AES-256-GCM, HMAC-SHA256) are FIPS-*approved*, but this code
-path is outside the validated cryptographic module. A CMMC L2 deployment that
-requires validated crypto end-to-end should keep bulk data on the TLS control
-path (omit `--fec`) until the data-plane crypto is routed through `aws-lc-rs`.
+The FEC symbol crypto (AES-256-GCM AEAD + HMAC-SHA256 KDF) is centralized in
+`src/aftp/fec/symcrypto.rs`, which routes to the FIPS 140-3 validated
+`aws-lc-rs` module under `--features fips` and to the RustCrypto
+`aes-gcm`/`hmac`/`sha2` crates otherwise. **A `--features fips` build therefore
+places the `--fec` data plane inside the same validated boundary as the TLS
+control plane** — bulk data no longer needs to stay on the TLS path for
+validated-crypto CUI. The wire format is byte-identical across backends (a KDF
+known-answer test and the AEAD round-trip tests run under both feature sets), so
+FIPS and default peers interoperate.
+
+A **default (non-FIPS) build** still uses RustCrypto for the data plane: the
+algorithms are FIPS-*approved* but outside the validated module. The PQC
+(`pqc_kyber`) and neural pipelines remain RustCrypto/unvalidated regardless of
+the feature — FIPS coverage now spans TLS + FEC, not those.
 
 ### Denial of service
 
@@ -668,9 +677,9 @@ path (omit `--fec`) until the data-plane crypto is routed through `aws-lc-rs`.
 | libloading | 0.8          | Medium   | Dynamic library loading (inherently risky)    |
 | quinn      | 0.11         | Low      | QUIC implementation using rustls              |
 | suppaftp   | 6.x          | Medium   | Less widely audited                           |
-| russh      | 0.46         | Medium   | SSH; RUSTSEC-2026-0154 alloc DoS — deferred major bump (see Appendix A) |
-| rust-s3    | 0.35         | Medium   | Pins old quick-xml/rustls-webpki (RUSTSEC-2026-0194/0195/0098) — deferred |
-| pqc_kyber  | 0.7          | **High** | RUSTSEC-2023-0079 KyberSlash timing attack    |
+| russh      | 0.62         | Low      | SSH; bumped from 0.46 (RUSTSEC-2026-0154/0153 fixed) |
+| rust-s3    | 0.37.2       | Low      | S3; bumped from 0.35 — pulls quick-xml 0.38 + webpki 0.103 (advisories cleared) |
+| ml-kem     | 0.3.2        | Low      | Post-quantum ML-KEM-1024 (RustCrypto); replaced unmaintained `pqc_kyber` |
 | crc32fast  | 1.4          | Low      | Hardware-accelerated CRC32, widely used       |
 | aws-lc-rs  | 1.x (opt)    | Low      | FIPS 140-3 validated (cert #4631)             |
 
@@ -685,31 +694,24 @@ change): the highest-severity, remotely-reachable advisories.
 | RUSTSEC-2026-0098/0099/0104 | rustls-webpki (0.103) | 0.103.10 → 0.103.13 | Name-constraint bypasses + reachable CRL panic in cert validation |
 | RUSTSEC-2026-0204 | crossbeam-epoch | 0.9.18 → 0.9.20    | Invalid pointer deref (dev-only, via criterion)       |
 
+**Fixed by the major-bump migration (see HANDOFF §6 #1):**
+
+| Advisory          | Crate           | Was → Now          | Description                                            |
+| ----------------- | --------------- | ------------------ | ----------------------------------------------------- |
+| RUSTSEC-2026-0154/0153 | russh / russh-cryptovec | 0.46 → 0.62 | Unbounded 32-bit alloc DoS from a malicious SSH server (SFTP/SCP handler). API rework: `russh-keys`→`russh::keys`, native async `Handler`. |
+| RUSTSEC-2026-0194/0195 | quick-xml       | 0.32 → 0.38 (via rust-s3 0.37.2) | Quadratic / unbounded-alloc XML DoS in the S3 handler's response parser. |
+| RUSTSEC-2026-0098/0099/0104 | rustls-webpki (S3 chain) | 0.101.7 → 0.103.13 (via rust-s3 0.37.2) | Cert-validation flaws on the S3 handler's old TLS stack; now on the same fixed webpki as the main path. |
+| RUSTSEC-2023-0079 | pqc_kyber       | 0.7 → `ml-kem` 0.3.2 | KyberSlash timing side-channel; migrated off the unmaintained crate to FIPS-203 ML-KEM-1024 (breaking key-format change). |
+
 **Remaining — no upstream fix (accepted, monitored):**
 
 | Advisory          | Crate           | Severity        | Exposure in AFT                                                  |
 | ----------------- | --------------- | --------------- | --------------------------------------------------------------- |
-| RUSTSEC-2023-0079 | pqc_kyber 0.7.1 | 🔴 HIGH (7.4)    | KyberSlash timing side-channel. Core PQC KEM; no fixed release exists. Local-attacker timing oracle, not remote. Tracked for migration to a maintained ML-KEM crate. |
-| RUSTSEC-2023-0071 | rsa 0.9.10      | 🟡 MEDIUM (5.9)  | Marvin timing attack. Transitive via `russh-keys` (SFTP only); AFT performs no RSA decryption itself. No fixed release. |
-
-**Remaining — fix requires a breaking major bump of an optional protocol
-handler (deferred to a dedicated migration, not this security release):**
-
-| Advisory          | Crate                    | Blocked by                | Exposure                                                                 |
-| ----------------- | ------------------------ | ------------------------- | ------------------------------------------------------------------------ |
-| RUSTSEC-2026-0154/0153 | russh / russh-cryptovec 0.46 | needs russh ≥0.60.3 (0.46→0.62 API break; `russh-keys` merged into `russh`) | Unbounded 32-bit allocation — a malicious SSH *server* can exhaust a connecting client. SFTP/SCP handler only; not reachable in AFTP/HTTP/S3 transfers. |
-| RUSTSEC-2026-0194/0195 | quick-xml 0.32           | pinned by `rust-s3` 0.35.1 (latest); needs quick-xml ≥0.41 | Quadratic / unbounded-alloc XML DoS. S3 handler only, parsing responses from the configured (semi-trusted) S3 endpoint. |
-| RUSTSEC-2026-0098/0099/0104 | rustls-webpki 0.101.7 | pinned by `rust-s3` 0.35.1's old `rustls 0.21` chain | Same cert-validation flaws as above, but on the S3 handler's TLS stack. The main AFTP/HTTP TLS path uses rustls 0.23 + webpki 0.103.13 (fixed). |
+| RUSTSEC-2023-0071 | rsa 0.10.0-rc   | 🟡 MEDIUM (5.9)  | Marvin timing attack. Now transitive-only via `russh`/`ssh-key` (SFTP host keys); AFT performs no RSA decryption itself and no fixed release exists. Removing it entirely would mean dropping RSA SSH host-key support. |
 
 **Unmaintained-crate warnings (informational):** `async-std` (via suppaftp/FTP),
 `number_prefix` (via indicatif), `rustls-pemfile`, `spin` (yanked, via
 rsa/ssh-key). None are known-exploitable; tracked with their parent crates.
-
-**Remediation plan for the deferred items:** a follow-up PR migrates `russh`
-0.46 → 0.62 (SFTP handler) and evaluates replacing or patching `rust-s3` to pull
-`quick-xml` ≥0.41 and `rustls` 0.23. These are isolated to the SFTP and S3
-protocol handlers and do not affect the AFTP data path, TLS control plane, or
-the FEC data plane.
 
 ---
 

@@ -2,8 +2,9 @@
 //!
 //! Provides three encryption methods:
 //!
-//! - **PQC**: Post-quantum Kyber1024 key encapsulation + AES-256-GCM
-//!   (NIST FIPS 203). Recommended for DoD environments.
+//! - **PQC**: Post-quantum ML-KEM-1024 key encapsulation + AES-256-GCM
+//!   (NIST FIPS 203, via the RustCrypto `ml-kem` crate). Recommended for DoD
+//!   environments.
 //! - **Neural**: Trained encoder-decoder neural network cipher.
 //!   Experimental — the model weights serve as the symmetric key.
 //! - **Hybrid**: PQC key exchange for session key, combined with
@@ -68,7 +69,7 @@ fn xor_with_key(data: &[u8], key: &[u8]) -> Vec<u8> {
 /// Encryption method selector.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum EncryptionMethod {
-    /// Post-quantum: Kyber1024 KEM + AES-256-GCM (NIST FIPS 203)
+    /// Post-quantum: ML-KEM-1024 KEM + AES-256-GCM (NIST FIPS 203)
     Pqc,
     /// Neural network: trained encoder-decoder cipher
     Neural,
@@ -80,7 +81,9 @@ impl EncryptionMethod {
     /// Parse from a CLI string.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
-            "pqc" | "kyber" | "post-quantum" => Some(Self::Pqc),
+            // "kyber" kept as a backward-compatible alias; the algorithm is now
+            // ML-KEM-1024 (see crypto::pqc).
+            "pqc" | "mlkem" | "ml-kem" | "kyber" | "post-quantum" => Some(Self::Pqc),
             "neural" | "nn" => Some(Self::Neural),
             "hybrid" => Some(Self::Hybrid),
             _ => None,
