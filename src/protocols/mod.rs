@@ -166,7 +166,6 @@ pub trait ProtocolHandler: Send + Sync {
     /// List directory contents at a URL
     async fn list(&self, url: &str, opts: &ProtocolOptions) -> AftResult<Vec<DirectoryEntry>>;
 
-
     // ------------------------------------------------------------------
     // Extended operations
     // ------------------------------------------------------------------

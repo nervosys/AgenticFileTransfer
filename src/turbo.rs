@@ -374,14 +374,10 @@ pub async fn turbo_local_copy(
     // Fast path: kernel-level copy (CopyFileExW on Windows, copy_file_range on Linux).
     let bytes = match turbo_local_copy_kernel(source, dest, file_size, progress_cb.clone()).await {
         Ok(b) => b,
-        Err(_) => {
-            match turbo_local_copy_mmap(source, dest, file_size, progress_cb.clone()).await {
-                Ok(b) => b,
-                Err(_) => {
-                    turbo_local_copy_buffered(source, dest, file_size, progress_cb).await?
-                }
-            }
-        }
+        Err(_) => match turbo_local_copy_mmap(source, dest, file_size, progress_cb.clone()).await {
+            Ok(b) => b,
+            Err(_) => turbo_local_copy_buffered(source, dest, file_size, progress_cb).await?,
+        },
     };
 
     let duration = start.elapsed();
@@ -639,7 +635,8 @@ pub async fn turbo_download_auto(
     progress_cb: Option<ProgressCb>,
 ) -> AftResult<(TransferResult, LinkProfile)> {
     // Detect localhost by URL — skip expensive HEAD probe for same-machine transfers
-    let url_is_local = url.contains("://localhost") || url.contains("://127.0.0.1") || url.contains("://[::1]");
+    let url_is_local =
+        url.contains("://localhost") || url.contains("://127.0.0.1") || url.contains("://[::1]");
 
     let (head_rtt_us, total_size, supports_ranges) = if url_is_local && turbo_config.streams == 0 {
         // Skip HEAD entirely for localhost: single-stream is always fastest
@@ -677,7 +674,11 @@ pub async fn turbo_download_auto(
 
     let profile = LinkProfile {
         rtt_us: head_rtt_us,
-        bandwidth_estimate: if is_local_link { 10_000_000_000 } else { 100_000_000 },
+        bandwidth_estimate: if is_local_link {
+            10_000_000_000
+        } else {
+            100_000_000
+        },
         bdp_bytes: 0,
         recommended_sock_buf: TARGET_SOCK_BUF,
         recommended_streams: streams,

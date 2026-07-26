@@ -239,7 +239,9 @@ pub struct VecBlocks {
 
 impl VecBlocks {
     pub fn with_len(len: usize) -> Self {
-        Self { buf: vec![0u8; len] }
+        Self {
+            buf: vec![0u8; len],
+        }
     }
 }
 
@@ -917,7 +919,9 @@ mod tests {
     }
 
     fn payload(len: usize) -> Vec<u8> {
-        (0..len).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect()
+        (0..len)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect()
     }
 
     fn params(total_len: u64, block_size: usize) -> FecParams {

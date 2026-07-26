@@ -239,7 +239,9 @@ mod tests {
 
     fn payload(len: usize) -> Vec<u8> {
         // Deterministic, non-repeating so a mis-ordered reassembly is visible.
-        (0..len).map(|i| (i.wrapping_mul(31) ^ (i >> 8)) as u8).collect()
+        (0..len)
+            .map(|i| (i.wrapping_mul(31) ^ (i >> 8)) as u8)
+            .collect()
     }
 
     #[test]
@@ -284,7 +286,10 @@ mod tests {
             delivered += 1;
             let _ = dec.push(s).unwrap();
         }
-        assert!(!dec.is_complete(), "should still need repair after 30% loss");
+        assert!(
+            !dec.is_complete(),
+            "should still need repair after 30% loss"
+        );
 
         // Repair symbols are generated on demand, none precomputed.
         for s in enc.repair_symbols(0, source.len() as u32) {

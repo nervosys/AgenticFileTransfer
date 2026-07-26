@@ -34,9 +34,7 @@ pub mod udp;
 // Convenience re-exports for consumers of the library target. The binary does
 // not use all of them yet, hence the allow.
 #[allow(unused_imports)]
-pub use codec::{
-    block_count, block_range, BlockDecoder, BlockEncoder, Oti, DEFAULT_BLOCK_SIZE,
-};
+pub use codec::{block_count, block_range, BlockDecoder, BlockEncoder, Oti, DEFAULT_BLOCK_SIZE};
 #[allow(unused_imports)]
 pub use envelope::{max_symbol_size, Envelope, DEFAULT_MTU};
 #[allow(unused_imports)]

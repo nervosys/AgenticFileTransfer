@@ -335,7 +335,8 @@ async fn chunked_download(
     let mut handles = Vec::with_capacity(num_chunks);
 
     // Share one handler across all chunks (reuses HTTP connection pool)
-    let shared_handler: Arc<dyn ProtocolHandler> = Arc::from(crate::protocols::resolve_protocol(url)?);
+    let shared_handler: Arc<dyn ProtocolHandler> =
+        Arc::from(crate::protocols::resolve_protocol(url)?);
     for (start, end) in chunks {
         let permit = semaphore
             .clone()

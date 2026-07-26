@@ -68,14 +68,11 @@ impl ProtocolHandler for LocalHandler {
             let dp = dest.to_path_buf();
             let cb = progress;
             let copied = tokio::task::spawn_blocking(move || -> AftResult<u64> {
-                let n = std::fs::copy(&sp, &dp)
-                    .map_err(|e| match e.kind() {
-                        std::io::ErrorKind::NotFound => AftError::FileNotFound(sp.clone()),
-                        std::io::ErrorKind::PermissionDenied => {
-                            AftError::PermissionDenied(sp.clone())
-                        }
-                        _ => AftError::Io(e),
-                    })?;
+                let n = std::fs::copy(&sp, &dp).map_err(|e| match e.kind() {
+                    std::io::ErrorKind::NotFound => AftError::FileNotFound(sp.clone()),
+                    std::io::ErrorKind::PermissionDenied => AftError::PermissionDenied(sp.clone()),
+                    _ => AftError::Io(e),
+                })?;
                 if let Some(ref cb) = cb {
                     cb(n, Some(n));
                 }
@@ -104,11 +101,16 @@ impl ProtocolHandler for LocalHandler {
             bytes_written = offset;
         }
         let mut dest_file = tokio::fs::OpenOptions::new()
-            .append(true).create(true).open(dest).await?;
+            .append(true)
+            .create(true)
+            .open(dest)
+            .await?;
         let mut buf = vec![0u8; 4 * 1024 * 1024];
         loop {
             let n = source.read(&mut buf).await?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             dest_file.write_all(&buf[..n]).await?;
             bytes_written += n as u64;
             if let Some(ref cb) = progress {
@@ -256,10 +258,13 @@ impl ProtocolHandler for LocalHandler {
     ) -> AftResult<()> {
         let path = url_to_path(url);
         let system_time = std::time::SystemTime::from(mtime);
-        let file = std::fs::OpenOptions::new().write(true).open(&path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => AftError::FileNotFound(path.clone()),
-            _ => AftError::Io(e),
-        })?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => AftError::FileNotFound(path.clone()),
+                _ => AftError::Io(e),
+            })?;
         file.set_modified(system_time)?;
         Ok(())
     }

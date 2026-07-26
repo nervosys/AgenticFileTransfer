@@ -162,8 +162,7 @@ impl Envelope {
         match key {
             Some(k) => {
                 let flags = self.flags | FLAG_AUTH | FLAG_ENCRYPTED;
-                let mut out =
-                    Vec::with_capacity(AUTH_OVERHEAD + self.payload.len());
+                let mut out = Vec::with_capacity(AUTH_OVERHEAD + self.payload.len());
                 self.write_prefix(flags, &mut out);
 
                 let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -335,7 +334,9 @@ mod tests {
         let e = env();
         let wire = e.encode(Some(KEY)).unwrap();
         assert!(
-            !wire.windows(e.payload.len()).any(|w| w == e.payload.as_slice()),
+            !wire
+                .windows(e.payload.len())
+                .any(|w| w == e.payload.as_slice()),
             "plaintext payload leaked into the ciphertext envelope"
         );
     }

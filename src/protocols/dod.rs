@@ -57,10 +57,9 @@ impl DodHandler {
             "X-Classification".to_string(),
             classification.header_value().to_string(),
         );
-        dod_opts.headers.insert(
-            "X-DoD-CDS".to_string(),
-            "AFT/1.0".to_string(),
-        );
+        dod_opts
+            .headers
+            .insert("X-DoD-CDS".to_string(), "AFT/1.0".to_string());
         // Never allow insecure for DoD transfers
         dod_opts.insecure = false;
         Ok(dod_opts)
@@ -145,7 +144,14 @@ impl ProtocolHandler for DodHandler {
 
         let handler = crate::protocols::http::HttpHandler::new("https".to_string());
         handler
-            .upload(source, &https_url, &dod_opts, content_type, method, progress)
+            .upload(
+                source,
+                &https_url,
+                &dod_opts,
+                content_type,
+                method,
+                progress,
+            )
             .await
     }
 

@@ -43,7 +43,9 @@ impl HttpHandler {
             .pool_max_idle_per_host(32)
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .http1_only()
-            .no_gzip().no_brotli().no_deflate(); // skip decompression middleware
+            .no_gzip()
+            .no_brotli()
+            .no_deflate(); // skip decompression middleware
 
         if opts.connect_timeout_secs > 0 {
             builder =

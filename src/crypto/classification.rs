@@ -74,10 +74,7 @@ pub fn print_banner(classification: Classification) {
 }
 
 /// Validate that the current configuration meets classification requirements.
-pub fn validate_compliance(
-    classification: Classification,
-    insecure: bool,
-) -> Result<(), String> {
+pub fn validate_compliance(classification: Classification, insecure: bool) -> Result<(), String> {
     if insecure && classification != Classification::Unclassified {
         return Err(format!(
             "STIG VIOLATION: --insecure cannot be used with {} data",

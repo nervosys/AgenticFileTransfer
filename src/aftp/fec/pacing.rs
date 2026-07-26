@@ -124,7 +124,10 @@ impl Pacer {
         let now = Instant::now();
 
         if !rtt.is_zero() {
-            self.rtt_samples.push_back(Sample { value: rtt, at: now });
+            self.rtt_samples.push_back(Sample {
+                value: rtt,
+                at: now,
+            });
         }
         let secs = elapsed.as_secs_f64();
         if secs > 0.0 && bytes > 0 {
@@ -363,7 +366,7 @@ mod tests {
         p.on_sample(1_000_000, Duration::from_millis(100), rtt); // 10 MB/s
         p.on_sample(5_000_000, Duration::from_millis(100), rtt); // 50 MB/s
         p.on_sample(2_000_000, Duration::from_millis(100), rtt); // 20 MB/s
-        // The peak is the estimate — a dip must not drag it down.
+                                                                 // The peak is the estimate — a dip must not drag it down.
         assert!((p.btlbw() - 50_000_000.0).abs() < 1.0);
     }
 
@@ -414,7 +417,11 @@ mod tests {
     #[test]
     fn startup_gain_exceeds_steady_state_gain() {
         let mut startup = Pacer::new();
-        startup.on_sample(1_000_000, Duration::from_millis(100), Duration::from_millis(10));
+        startup.on_sample(
+            1_000_000,
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+        );
         let startup_rate = startup.pacing_rate();
         let bw = startup.btlbw();
         // Startup deliberately overshoots to find the pipe quickly.
@@ -425,7 +432,11 @@ mod tests {
     fn target_inflight_tracks_the_bandwidth_delay_product() {
         let mut p = Pacer::new();
         // 100 MB/s over an 80 ms path → BDP of 8 MB.
-        p.on_sample(10_000_000, Duration::from_millis(100), Duration::from_millis(80));
+        p.on_sample(
+            10_000_000,
+            Duration::from_millis(100),
+            Duration::from_millis(80),
+        );
         let inflight = p.target_inflight();
         assert!(
             (8_000_000..=32_000_000).contains(&inflight),
@@ -450,7 +461,11 @@ mod tests {
     fn tiny_pacing_gaps_are_accumulated_not_slept() {
         let mut p = Pacer::new();
         // A fast link: each 1362-byte symbol is due only a few microseconds.
-        p.on_sample(100_000_000, Duration::from_secs(1), Duration::from_millis(1));
+        p.on_sample(
+            100_000_000,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        );
 
         let mut sleeps = 0;
         let mut total = Duration::ZERO;
@@ -474,7 +489,11 @@ mod tests {
     #[test]
     fn token_bucket_does_not_bank_unbounded_burst() {
         let mut p = Pacer::new();
-        p.on_sample(1_000_000, Duration::from_millis(100), Duration::from_millis(10));
+        p.on_sample(
+            1_000_000,
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+        );
         // Idle, then demand a large burst: the cap must still force a wait.
         std::thread::sleep(Duration::from_millis(30));
         let burst = (p.pacing_rate() * 5.0) as u64;
@@ -509,7 +528,11 @@ mod tests {
         let high = repair_symbol_count(1000, 0.10);
         assert!(high > low, "{} should exceed {}", high, low);
         // 10% loss should cost roughly 17% extra symbols, not 2× or 1.001×.
-        assert!((150..=250).contains(&high), "unexpected repair count {}", high);
+        assert!(
+            (150..=250).contains(&high),
+            "unexpected repair count {}",
+            high
+        );
         // Any loss at all yields at least one repair symbol.
         assert!(repair_symbol_count(10, 0.001) >= 1);
     }

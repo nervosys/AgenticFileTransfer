@@ -97,7 +97,8 @@ impl QuicDataPlane {
     /// momentarily full send buffer applies backpressure to the pacer rather
     /// than dropping the symbol before it ever hits the wire.
     pub async fn send(&self, block_id: u32, session_id: u64, symbol: &[u8]) -> AftResult<usize> {
-        let wire = Envelope::new(session_id, block_id, symbol.to_vec()).encode(self.key.as_deref())?;
+        let wire =
+            Envelope::new(session_id, block_id, symbol.to_vec()).encode(self.key.as_deref())?;
         let n = wire.len();
         self.conn
             .send_datagram_wait(Bytes::from(wire))
@@ -193,7 +194,9 @@ pub async fn accept_plane(
         .ok_or_else(|| AftError::ConnectionFailed("QUIC data plane endpoint closed".into()))?
         .await
         .map_err(|e| AftError::ConnectionFailed(format!("QUIC data plane accept: {}", e)))?;
-    Ok(QuicDataPlane::with_endpoint(conn, endpoint, key, session_id))
+    Ok(QuicDataPlane::with_endpoint(
+        conn, endpoint, key, session_id,
+    ))
 }
 
 /// Dial the peer's data-plane listener and wrap the connection.
@@ -208,7 +211,9 @@ pub async fn connect_plane(
         .map_err(|e| AftError::ConnectionFailed(format!("QUIC data plane connect: {}", e)))?
         .await
         .map_err(|e| AftError::ConnectionFailed(format!("QUIC data plane connect: {}", e)))?;
-    Ok(QuicDataPlane::with_endpoint(conn, endpoint, key, session_id))
+    Ok(QuicDataPlane::with_endpoint(
+        conn, endpoint, key, session_id,
+    ))
 }
 
 // ── Connection setup (dev/self-signed, mirrors aftp::transport) ──────────────

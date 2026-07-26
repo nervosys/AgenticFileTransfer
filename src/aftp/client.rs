@@ -702,8 +702,16 @@ impl AftpClient {
     ) -> AftResult<u64> {
         use super::fec::transfer::FileBlocks;
         let blocks = FileBlocks::new(source.to_path_buf(), 0);
-        self.spray_fec_object(reader, writer, &blocks, file_size, false, use_fec_quic, progress)
-            .await
+        self.spray_fec_object(
+            reader,
+            writer,
+            &blocks,
+            file_size,
+            false,
+            use_fec_quic,
+            progress,
+        )
+        .await
     }
 
     /// Push a whole directory tree over the fountain data plane as one packed
@@ -831,10 +839,7 @@ impl AftpClient {
         if is_tree {
             write_frame(
                 &mut writer,
-                &Frame::new(
-                    FRAME_FEC_TREE,
-                    vec![super::fec::manifest::MANIFEST_VERSION],
-                ),
+                &Frame::new(FRAME_FEC_TREE, vec![super::fec::manifest::MANIFEST_VERSION]),
             )
             .await?;
         }
@@ -1073,7 +1078,8 @@ impl AftpClient {
             quic_endpoint = Some(ep);
             port
         } else {
-            let udp = DataPlane::bind_for_session("0.0.0.0:0", key.clone(), offer.session_id).await?;
+            let udp =
+                DataPlane::bind_for_session("0.0.0.0:0", key.clone(), offer.session_id).await?;
             let port = udp.local_addr()?.port();
             udp_plane = Some(udp);
             port
@@ -1242,7 +1248,8 @@ impl AftpClient {
     // ── DOWNLOAD RANGE ──────────────────────────────────────────────────────
 
     pub async fn download_range(&self, path: &str, start: u64, end: u64) -> AftResult<Vec<u8>> {
-        let (mut reader, mut writer, max_frame, _, use_crc32, _session_id, _, _) = self.connect().await?;
+        let (mut reader, mut writer, max_frame, _, use_crc32, _session_id, _, _) =
+            self.connect().await?;
 
         let payload = build_get(path, start, end);
         write_frame(&mut writer, &Frame::new(FRAME_GET, payload)).await?;

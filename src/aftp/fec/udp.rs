@@ -99,8 +99,8 @@ impl DataPlane {
 
     /// Send one symbol to the connected peer.
     pub async fn send(&self, block_id: u32, session_id: u64, symbol: &[u8]) -> AftResult<usize> {
-        let wire = Envelope::new(session_id, block_id, symbol.to_vec())
-            .encode(self.key.as_deref())?;
+        let wire =
+            Envelope::new(session_id, block_id, symbol.to_vec()).encode(self.key.as_deref())?;
         self.socket
             .send(&wire)
             .await
@@ -115,8 +115,8 @@ impl DataPlane {
         session_id: u64,
         symbol: &[u8],
     ) -> AftResult<usize> {
-        let wire = Envelope::new(session_id, block_id, symbol.to_vec())
-            .encode(self.key.as_deref())?;
+        let wire =
+            Envelope::new(session_id, block_id, symbol.to_vec()).encode(self.key.as_deref())?;
         self.socket
             .send_to(&wire, peer)
             .await
@@ -250,7 +250,10 @@ mod tests {
     async fn unverifiable_datagram_is_dropped_not_fatal() {
         let (tx, rx) = pair(Some(KEY.to_vec())).await;
         // Raw garbage straight onto the wire, bypassing the envelope encoder.
-        tx.socket.send(b"not a valid envelope at all").await.unwrap();
+        tx.socket
+            .send(b"not a valid envelope at all")
+            .await
+            .unwrap();
         assert!(rx.recv(SESSION).await.unwrap().is_none());
 
         // The receiver still works afterwards.
@@ -266,9 +269,12 @@ mod tests {
         let rx = DataPlane::bind("127.0.0.1:0", Some(KEY.to_vec()))
             .await
             .unwrap();
-        let attacker = DataPlane::bind("127.0.0.1:0", Some(b"ffffffffffffffffffffffffffffffff".to_vec()))
-            .await
-            .unwrap();
+        let attacker = DataPlane::bind(
+            "127.0.0.1:0",
+            Some(b"ffffffffffffffffffffffffffffffff".to_vec()),
+        )
+        .await
+        .unwrap();
         attacker.connect(rx.local_addr().unwrap()).await.unwrap();
         attacker.send(1, SESSION, b"forged").await.unwrap();
         assert!(rx.recv(SESSION).await.unwrap().is_none());

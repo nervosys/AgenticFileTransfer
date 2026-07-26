@@ -337,12 +337,12 @@ pub async fn sync(
         // fetched these, so `--preserve` costs no extra round trips.
         let src_mtimes: HashMap<&str, &str> = src_entries
             .iter()
-            .filter_map(|e| {
-                match (e.relative_path.as_deref(), e.last_modified.as_deref()) {
+            .filter_map(
+                |e| match (e.relative_path.as_deref(), e.last_modified.as_deref()) {
                     (Some(rel), Some(mtime)) => Some((rel, mtime)),
                     _ => None,
-                }
-            })
+                },
+            )
             .collect();
 
         result.files_skipped = actions
@@ -400,8 +400,8 @@ pub async fn sync(
                     .await?;
 
                     if config.preserve_timestamps {
-                        if let Some(mtime) = src_mtime
-                            .and_then(|m| chrono::DateTime::parse_from_rfc3339(m).ok())
+                        if let Some(mtime) =
+                            src_mtime.and_then(|m| chrono::DateTime::parse_from_rfc3339(m).ok())
                         {
                             let _ = dst_handler
                                 .set_timestamps(&dst_url, mtime.with_timezone(&chrono::Utc), opts)

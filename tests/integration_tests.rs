@@ -1579,8 +1579,7 @@ mod aftp_e2e_tests {
         // Localhost lab client: consent to the unauthenticated (CRC32-only) data
         // plane so the round-trip tests exercise FEC. Production requires an
         // explicit `--fec-insecure` on the client for this, mirroring the server.
-        AftpClient::new("127.0.0.1".into(), port, None, false, false)
-            .with_unauthenticated_fec(true)
+        AftpClient::new("127.0.0.1".into(), port, None, false, false).with_unauthenticated_fec(true)
     }
 
     #[tokio::test]
@@ -2056,7 +2055,12 @@ mod aftp_e2e_tests {
             fec_payload(1234)
         );
         assert!(out.join("nested/zero.bin").is_file());
-        assert_eq!(std::fs::metadata(out.join("nested/zero.bin")).unwrap().len(), 0);
+        assert_eq!(
+            std::fs::metadata(out.join("nested/zero.bin"))
+                .unwrap()
+                .len(),
+            0
+        );
         assert!(out.join("empty").is_dir());
         // No staging artifacts left behind.
         assert!(!served.join("dest.aft-tree-tmp").exists());
@@ -2140,7 +2144,10 @@ mod aftp_e2e_tests {
 
         let out = served.join("qdest");
         assert_eq!(std::fs::read(out.join("big.bin")).unwrap(), big);
-        assert_eq!(std::fs::read(out.join("nested/a.txt")).unwrap(), b"quic tree");
+        assert_eq!(
+            std::fs::read(out.join("nested/a.txt")).unwrap(),
+            b"quic tree"
+        );
 
         handle.abort();
     }
@@ -2301,7 +2308,10 @@ mod aftp_e2e_tests {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         let client = make_client(port).with_fec(true);
-        let chunk = client.download_range("/ranged.bin", 1000, 1999).await.unwrap();
+        let chunk = client
+            .download_range("/ranged.bin", 1000, 1999)
+            .await
+            .unwrap();
 
         assert_eq!(chunk.len(), 1000);
         assert_eq!(chunk, &content[1000..2000]);
@@ -2369,7 +2379,16 @@ mod security_tests {
 
         let port = 12658;
         let server = AftpServer::new(
-            &root, port, "127.0.0.1", None, false, false, false, None, None, 0,
+            &root,
+            port,
+            "127.0.0.1",
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            0,
         );
         let handle = tokio::spawn(async move {
             let _ = server.run().await;
@@ -2396,9 +2415,16 @@ mod security_tests {
 
         // The legitimate nested case still works — this is what the relaxation
         // was for.
-        let ok = client.upload(&payload, "/fresh/nested/deep/file.txt", None).await;
+        let ok = client
+            .upload(&payload, "/fresh/nested/deep/file.txt", None)
+            .await;
         assert!(ok.is_ok(), "nested upload should succeed: {:?}", ok.err());
-        assert!(root.join("fresh").join("nested").join("deep").join("file.txt").exists());
+        assert!(root
+            .join("fresh")
+            .join("nested")
+            .join("deep")
+            .join("file.txt")
+            .exists());
 
         handle.abort();
     }
@@ -5318,7 +5344,10 @@ mod sync_engine_tests {
                 .join(format!("f{}.txt", i));
             let s = fs::metadata(src.join(&rel)).unwrap().modified().unwrap();
             let d = fs::metadata(dst.join(&rel)).unwrap().modified().unwrap();
-            let delta = s.duration_since(d).or_else(|_| d.duration_since(s)).unwrap();
+            let delta = s
+                .duration_since(d)
+                .or_else(|_| d.duration_since(s))
+                .unwrap();
             assert!(
                 delta < std::time::Duration::from_secs(2),
                 "mtime not preserved for {:?}: {:?} vs {:?}",

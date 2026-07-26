@@ -20,7 +20,9 @@ use std::sync::Arc;
 use clap::Parser;
 use sha2::Digest;
 
-use cli::{ChecksumAlgorithm, Cli, CliCompareMode, Command, OutputFormat, PluginAction, TelemetryAction};
+use cli::{
+    ChecksumAlgorithm, Cli, CliCompareMode, Command, OutputFormat, PluginAction, TelemetryAction,
+};
 use colored::Colorize;
 use engine::ProgressCb;
 use error::AftResult;
@@ -309,13 +311,30 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
             exclude,
             preserve,
             dry_run,
-        } => cmd_copy(cli, format, source, destination, *recursive, include, exclude, *preserve, *dry_run).await,
+        } => {
+            cmd_copy(
+                cli,
+                format,
+                source,
+                destination,
+                *recursive,
+                include,
+                exclude,
+                *preserve,
+                *dry_run,
+            )
+            .await
+        }
         Command::Head {
             url,
             headers,
             bearer_token,
         } => cmd_head(cli, format, url, headers, bearer_token.as_deref()).await,
-        Command::List { url, recursive, long } => cmd_list(cli, format, url, *recursive, *long).await,
+        Command::List {
+            url,
+            recursive,
+            long,
+        } => cmd_list(cli, format, url, *recursive, *long).await,
         Command::Schema => {
             ontology::print_schema(format);
             Ok(OutputResult::success("schema"))
@@ -379,9 +398,35 @@ async fn run_command(cli: &Cli, format: Format) -> AftResult<OutputResult> {
             max_size,
             max_depth,
             transfers,
-        } => cmd_sync(cli, format, source, destination, compare, *dry_run, *delete, *update, *preserve, include, exclude, *min_size, *max_size, *max_depth, *transfers).await,
-        Command::Move { source, destination } => cmd_mv(cli, source, destination).await,
-        Command::Remove { url, recursive, force: _ } => cmd_rm(cli, url, *recursive).await,
+        } => {
+            cmd_sync(
+                cli,
+                format,
+                source,
+                destination,
+                compare,
+                *dry_run,
+                *delete,
+                *update,
+                *preserve,
+                include,
+                exclude,
+                *min_size,
+                *max_size,
+                *max_depth,
+                *transfers,
+            )
+            .await
+        }
+        Command::Move {
+            source,
+            destination,
+        } => cmd_mv(cli, source, destination).await,
+        Command::Remove {
+            url,
+            recursive,
+            force: _,
+        } => cmd_rm(cli, url, *recursive).await,
         Command::Mkdir { url } => cmd_mkdir(cli, url).await,
         Command::Plugin { action } => cmd_plugin(action).await,
         Command::Crypto { action } => cmd_crypto(action, cli.experimental_crypto).await,
@@ -547,14 +592,18 @@ async fn cmd_get(
         let progress_cb: Option<ProgressCb> = pb.as_ref().map(|pb| {
             let pb = pb.clone();
             Arc::new(move |bytes: u64, total: Option<u64>| {
-                if let Some(t) = total { pb.set_length(t); }
+                if let Some(t) = total {
+                    pb.set_length(t);
+                }
                 pb.set_position(bytes);
             }) as ProgressCb
         });
         let r = turbo::turbo_download_auto(&*handler, url, &dest, &opts, &tc, progress_cb)
             .await
             .map(|(tr, _profile)| tr);
-        if let Some(ref pb) = pb { pb.finish_and_clear(); }
+        if let Some(ref pb) = pb {
+            pb.finish_and_clear();
+        }
         r
     } else {
         let metadata = handler.head(url, &opts).await.ok();
@@ -567,7 +616,9 @@ async fn cmd_get(
             }) as ProgressCb
         });
         let r = engine::download(&*handler, url, &dest, &opts, &config, progress_cb).await;
-        if let Some(ref pb) = pb { pb.finish_and_clear(); }
+        if let Some(ref pb) = pb {
+            pb.finish_and_clear();
+        }
         r
     };
 
@@ -632,9 +683,18 @@ async fn cmd_put(
 
     let result = if cli.turbo {
         let tc = build_turbo_config(cli);
-        turbo::turbo_upload_auto(&*handler, source_path, url, &opts, &tc, content_type, Some(method), progress_cb)
-            .await
-            .map(|(tr, _profile)| tr)
+        turbo::turbo_upload_auto(
+            &*handler,
+            source_path,
+            url,
+            &opts,
+            &tc,
+            content_type,
+            Some(method),
+            progress_cb,
+        )
+        .await
+        .map(|(tr, _profile)| tr)
     } else {
         engine::upload(
             &*handler,
@@ -715,7 +775,10 @@ async fn cmd_copy(
         && Path::new(source).is_dir()
     {
         let handler = protocols::aftp::AftpHandler::new(dst_handler.scheme().to_string());
-        match handler.upload_tree(Path::new(source), destination, &opts, None).await {
+        match handler
+            .upload_tree(Path::new(source), destination, &opts, None)
+            .await
+        {
             Ok(bytes) => {
                 let mut out = OutputResult::success("Copy");
                 out.source = Some(source.to_string());
@@ -931,7 +994,13 @@ async fn cmd_head(
     }
 }
 
-async fn cmd_list(cli: &Cli, _format: Format, url: &str, recursive: bool, _long: bool) -> AftResult<OutputResult> {
+async fn cmd_list(
+    cli: &Cli,
+    _format: Format,
+    url: &str,
+    recursive: bool,
+    _long: bool,
+) -> AftResult<OutputResult> {
     let handler = protocols::resolve_protocol(url)?;
     let opts = build_opts(cli, &[], None, None, None, None);
 
@@ -1005,7 +1074,16 @@ async fn cmd_sync(
         },
     };
 
-    let result = sync::sync(&*src_handler, source, &*dst_handler, destination, &opts, &config, None).await?;
+    let result = sync::sync(
+        &*src_handler,
+        source,
+        &*dst_handler,
+        destination,
+        &opts,
+        &config,
+        None,
+    )
+    .await?;
 
     let mut out = OutputResult::success("Sync");
     out.source = Some(source.to_string());
@@ -1019,7 +1097,10 @@ async fn cmd_mv(cli: &Cli, source: &str, destination: &str) -> AftResult<OutputR
     let opts = build_opts(cli, &[], None, None, None, None);
 
     if !handler.supports_extended_ops() {
-        return Ok(OutputResult::failure("Move", "Protocol does not support move/rename operations"));
+        return Ok(OutputResult::failure(
+            "Move",
+            "Protocol does not support move/rename operations",
+        ));
     }
 
     handler.rename(source, destination, &opts).await?;
@@ -1036,7 +1117,10 @@ async fn cmd_rm(cli: &Cli, url: &str, recursive: bool) -> AftResult<OutputResult
     let opts = build_opts(cli, &[], None, None, None, None);
 
     if !handler.supports_extended_ops() {
-        return Ok(OutputResult::failure("Remove", "Protocol does not support delete operations"));
+        return Ok(OutputResult::failure(
+            "Remove",
+            "Protocol does not support delete operations",
+        ));
     }
 
     handler.delete(url, recursive, &opts).await?;
@@ -1052,7 +1136,10 @@ async fn cmd_mkdir(cli: &Cli, url: &str) -> AftResult<OutputResult> {
     let opts = build_opts(cli, &[], None, None, None, None);
 
     if !handler.supports_extended_ops() {
-        return Ok(OutputResult::failure("Mkdir", "Protocol does not support mkdir operations"));
+        return Ok(OutputResult::failure(
+            "Mkdir",
+            "Protocol does not support mkdir operations",
+        ));
     }
 
     handler.mkdir(url, &opts).await?;

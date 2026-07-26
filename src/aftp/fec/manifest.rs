@@ -41,7 +41,9 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::aftp::frame::{get_bytes, get_str, get_u32, get_u64, get_u8, put_bytes, put_str, put_u32, put_u64, put_u8};
+use crate::aftp::frame::{
+    get_bytes, get_str, get_u32, get_u64, get_u8, put_bytes, put_str, put_u32, put_u64, put_u8,
+};
 use crate::error::{AftError, AftResult};
 
 use super::transfer::BlockReader;
@@ -318,7 +320,11 @@ fn rel_path(root: &Path, path: &Path) -> AftResult<String> {
                 out.push_str(&s.to_string_lossy());
             }
             // The tree walk only ever produces normal components below `root`.
-            _ => return Err(AftError::Other("manifest: unexpected path component".into())),
+            _ => {
+                return Err(AftError::Other(
+                    "manifest: unexpected path component".into(),
+                ))
+            }
         }
     }
     validate_rel_path(&out)?;
@@ -647,7 +653,11 @@ pub async fn unpack_tree(
     let mut files_written: u64 = 0;
     let mut buf = vec![0u8; 1 << 20];
 
-    for e in manifest.entries.iter().filter(|e| e.kind == EntryKind::File) {
+    for e in manifest
+        .entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::File)
+    {
         let target = safe_join(&canonical_root, &e.path)?;
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -659,7 +669,9 @@ pub async fn unpack_tree(
         name.push(".aftp-unpack");
         let tmp = target.with_file_name(name);
 
-        packed.seek(std::io::SeekFrom::Start(data_base + e.offset)).await?;
+        packed
+            .seek(std::io::SeekFrom::Start(data_base + e.offset))
+            .await?;
         let mut remaining = e.size;
         let mut hasher = Sha256::new();
         let mut out = tokio::fs::File::create(&tmp).await?;
@@ -851,10 +863,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_pack_unpack_round_trips() {
-        let tmp = std::env::temp_dir().join(format!(
-            "aftp-manifest-test-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("aftp-manifest-test-{}", std::process::id()));
         let src = tmp.join("src");
         let dst = tmp.join("dst");
         let _ = tokio::fs::remove_dir_all(&tmp).await;

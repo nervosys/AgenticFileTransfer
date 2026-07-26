@@ -48,7 +48,9 @@ pub fn seal(key: &[u8], nonce: &[u8], aad: &[u8], plaintext: &[u8]) -> AftResult
 pub fn open(key: &[u8], nonce: &[u8], aad: &[u8], sealed: &[u8]) -> AftResult<Vec<u8>> {
     check_lengths(key, nonce)?;
     if sealed.len() < TAG_LEN {
-        return Err(AftError::Other("FEC sealed symbol shorter than its tag".to_string()));
+        return Err(AftError::Other(
+            "FEC sealed symbol shorter than its tag".to_string(),
+        ));
     }
     backend::open(key, nonce, aad, sealed)
 }
@@ -86,8 +88,8 @@ mod backend {
         // accepts any length, so this cannot fail.
         // Disambiguate: `KeyInit` (from aes-gcm, in scope for `seal`/`open`)
         // also offers `new_from_slice`.
-        let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key)
-            .expect("HMAC accepts any key length");
+        let mut mac =
+            <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
         for p in parts {
             mac.update(p);
         }
@@ -98,7 +100,13 @@ mod backend {
         let cipher = Aes256Gcm::new_from_slice(key)
             .map_err(|e| AftError::Other(format!("FEC cipher key: {}", e)))?;
         cipher
-            .encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+            .encrypt(
+                Nonce::from_slice(nonce),
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
             .map_err(|_| AftError::Other("FEC symbol encryption failed".to_string()))
     }
 

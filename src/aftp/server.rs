@@ -807,26 +807,25 @@ where
     // ── Handshake (HELLO or RESUME) ─────────────────────────────────────
     let first_frame = read_frame(&mut reader, INITIAL_MAX_PAYLOAD).await?;
 
-    let (use_compression, use_crc32, max_payload, session_id, use_fec, use_fec_quic) = match first_frame
-        .frame_type
-    {
-        FRAME_HELLO => {
-            handle_hello_handshake(&state, &mut reader, &mut writer, &first_frame, addr).await?
-        }
-        // A resumed session continues on the reliable path: the data plane is
-        // negotiated per connection, and a resume carries no offer.
-        FRAME_RESUME => {
-            let (c, r, m, s) =
-                handle_resume_handshake(&state, &mut writer, &first_frame, addr).await?;
-            (c, r, m, s, false, false)
-        }
-        _ => {
-            send_error(&mut writer, ERR_INVALID_REQUEST, "Expected HELLO or RESUME").await?;
-            return Err(AftError::Other(
-                "Client did not send HELLO or RESUME".into(),
-            ));
-        }
-    };
+    let (use_compression, use_crc32, max_payload, session_id, use_fec, use_fec_quic) =
+        match first_frame.frame_type {
+            FRAME_HELLO => {
+                handle_hello_handshake(&state, &mut reader, &mut writer, &first_frame, addr).await?
+            }
+            // A resumed session continues on the reliable path: the data plane is
+            // negotiated per connection, and a resume carries no offer.
+            FRAME_RESUME => {
+                let (c, r, m, s) =
+                    handle_resume_handshake(&state, &mut writer, &first_frame, addr).await?;
+                (c, r, m, s, false, false)
+            }
+            _ => {
+                send_error(&mut writer, ERR_INVALID_REQUEST, "Expected HELLO or RESUME").await?;
+                return Err(AftError::Other(
+                    "Client did not send HELLO or RESUME".into(),
+                ));
+            }
+        };
 
     // ── Request loop ────────────────────────────────────────────────────
     // The client sends its first command immediately after our HELLO_ACK, so
@@ -950,7 +949,15 @@ where
 {
     let offer = parse_fec_offer(&offer_frame.payload)?;
     recv_fec_object(
-        reader, writer, &offer, temp_path, addr, verbose, use_fec_quic, auth_token, ctrl_rtt,
+        reader,
+        writer,
+        &offer,
+        temp_path,
+        addr,
+        verbose,
+        use_fec_quic,
+        auth_token,
+        ctrl_rtt,
     )
     .await?;
 
@@ -999,7 +1006,15 @@ where
     }
     let offer = parse_fec_offer(&offer_frame.payload)?;
     recv_fec_object(
-        reader, writer, &offer, temp_path, addr, verbose, use_fec_quic, auth_token, ctrl_rtt,
+        reader,
+        writer,
+        &offer,
+        temp_path,
+        addr,
+        verbose,
+        use_fec_quic,
+        auth_token,
+        ctrl_rtt,
     )
     .await?;
 
@@ -1172,10 +1187,12 @@ where
         // the real RTT avoids premature repair asks on a high-latency path
         // before that adaptation converges. Clamp to a sane band, and fall back
         // to the old default if no sample was taken (e.g. a resumed session).
-        let rtt = ctrl_rtt.unwrap_or(std::time::Duration::from_millis(50)).clamp(
-            std::time::Duration::from_millis(50),
-            std::time::Duration::from_millis(500),
-        );
+        let rtt = ctrl_rtt
+            .unwrap_or(std::time::Duration::from_millis(50))
+            .clamp(
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_millis(500),
+            );
         let recv_fut = recv_object_into(&*plane, &mut sink, &fb_tx, &params, rtt);
         tokio::pin!(recv_fut);
 
