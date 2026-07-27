@@ -425,8 +425,8 @@ Manage anonymous telemetry collection. All commands are under \`aft telemetry\`.
 | Command | Description |
 |---------|-------------|
 | \`aft telemetry status\` | Show telemetry status and collected data |
-| \`aft telemetry opt-in\` | Enable anonymous telemetry (default) |
-| \`aft telemetry opt-out\` | Disable anonymous telemetry |
+| \`aft telemetry opt-in\` | Enable anonymous telemetry (off by default) |
+| \`aft telemetry opt-out\` | Disable anonymous telemetry (default) |
 | \`aft telemetry reset\` | Generate a new anonymous installation ID |
 | \`aft telemetry sync\` | Manually sync telemetry to remote endpoint |
 | \`aft telemetry clear\` | Clear local telemetry records |

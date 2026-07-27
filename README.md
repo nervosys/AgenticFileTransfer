@@ -636,7 +636,7 @@ src/
     ├── smb.rs              # SMB/CIFS (UNC + smbclient)
     └── dod.rs              # DoD CDS protocol (classification-aware HTTPS)
 tests/
-└── integration_tests.rs    # 322 tests (engine, AFTP server, crypto, CLI, mux, classification, telemetry, session resume, hardening, sync, extended ops)
+└── integration_tests.rs    # 312 tests (engine, AFTP server, crypto, CLI, mux, classification, telemetry, session resume, hardening, sync, extended ops)
 .github/
 └── workflows/ci.yml        # CI pipeline (test, clippy, fmt, cargo-audit)
 ```
@@ -760,9 +760,9 @@ This software contains cryptographic functionality and is subject to U.S. export
 | QUIC (quinn)          | Varies          | Transport encryption                                |
 | Neural network cipher | Model-dependent | Experimental MLP autoencoder encryption             |
 
-This software has been publicly released and a notification has been submitted to the U.S. Bureau of Industry and Security (BIS) and the National Security Agency (NSA) in accordance with EAR §742.15(b). This software may be exported and re-exported under License Exception ENC without further authorization, except to embargoed destinations and denied persons per EAR Part 746 and the Entity List (Supplement No. 4 to Part 744).
+As publicly available open-source encryption source code, AFT is eligible for export under License Exception ENC (§740.17(b)(1)), subject to embargoed destinations and denied/entity-listed parties (EAR Part 746 and Supplement No. 4 to Part 744). License Exception ENC requires a one-time notification email to the U.S. Bureau of Industry and Security (BIS) and the National Security Agency (NSA) under EAR §742.15(b) at the time the source code is made publicly available; that filing is the responsibility of the distributor making it public.
 
-**This notice does not constitute legal advice.** Consult an export control attorney for your specific use case.
+**This notice does not constitute legal advice.** Consult an export control attorney before publicly distributing this software.
 
 ## License
 
