@@ -8,8 +8,9 @@
 //! personal data is collected — only aggregate usage statistics such as
 //! commands used, protocol types, transfer sizes, and error types.
 //!
-//! When enabled, data is sent to a Nervosys telemetry endpoint. Users can opt
-//! back out at any time via `aft telemetry opt-out`.
+//! When enabled, data is sent to a Nervosys OpenTelemetry (OTLP/HTTP, JSON)
+//! collector as the logs signal. Users can opt back out at any time via
+//! `aft telemetry opt-out`.
 
 use crate::error::{AftError, AftResult};
 use serde::{Deserialize, Serialize};
@@ -18,8 +19,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
-/// Default telemetry endpoint (Nervosys AWS EC2)
-pub const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://telemetry.nervosys.com/aft";
+/// Default telemetry endpoint (Nervosys OpenTelemetry/OTLP collector)
+pub const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://nervosys.ai/otlp";
 
 /// Telemetry configuration stored on disk (~/.aft/telemetry.json)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +327,111 @@ impl TelemetryRecord {
 }
 
 // =============================================================================
+// OTLP/HTTP JSON MAPPING
+// =============================================================================
+// The remote collector speaks OpenTelemetry (OTLP/HTTP, JSON encoding). These
+// helpers map our records onto the OTLP *logs* signal. Encoding rules that bite:
+// per the protobuf-JSON mapping, 64-bit integer fields (`timeUnixNano`,
+// `intValue`) are serialized as decimal **strings**, while doubles and bools are
+// JSON numbers/bools.
+
+/// OpenTelemetry severity for a record's category: ERROR for the "error"
+/// category, INFO for everything else.
+fn otlp_severity(category: &str) -> (i64, &'static str) {
+    if category.eq_ignore_ascii_case("error") {
+        (17, "ERROR")
+    } else {
+        (9, "INFO")
+    }
+}
+
+/// Convert a JSON value into an OTLP `AnyValue` object.
+fn otlp_any_value(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::String(s) => serde_json::json!({ "stringValue": s }),
+        Value::Bool(b) => serde_json::json!({ "boolValue": b }),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                serde_json::json!({ "intValue": i.to_string() })
+            } else {
+                serde_json::json!({ "doubleValue": n.as_f64().unwrap_or(0.0) })
+            }
+        }
+        // Null, arrays, objects: keep the data as a compact JSON string rather
+        // than dropping it or inventing a structure the collector may reject.
+        Value::Null => serde_json::json!({ "stringValue": "" }),
+        other => serde_json::json!({ "stringValue": other.to_string() }),
+    }
+}
+
+/// One OTLP `KeyValue`.
+fn otlp_kv(key: &str, value: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "key": key, "value": value })
+}
+
+/// Convert telemetry records into an OTLP/HTTP JSON logs request body: a single
+/// `resourceLogs` entry for this installation, one `logRecord` per record.
+fn records_to_otlp_logs(installation_id: &str, records: &[TelemetryRecord]) -> serde_json::Value {
+    let version = env!("CARGO_PKG_VERSION");
+    let log_records: Vec<serde_json::Value> = records
+        .iter()
+        .map(|r| {
+            // seconds -> nanoseconds, widened so the multiply cannot overflow.
+            let nanos = (r.timestamp as i128 * 1_000_000_000).to_string();
+            let (sev_num, sev_text) = otlp_severity(&r.category);
+            let mut attrs = vec![
+                otlp_kv("category", serde_json::json!({ "stringValue": r.category })),
+                otlp_kv("event", serde_json::json!({ "stringValue": r.event })),
+                otlp_kv("record.id", serde_json::json!({ "stringValue": r.id })),
+            ];
+            if let Some(ctx) = &r.context {
+                attrs.push(otlp_kv(
+                    "context",
+                    serde_json::json!({ "stringValue": ctx }),
+                ));
+            }
+            if !r.tags.is_empty() {
+                attrs.push(otlp_kv(
+                    "tags",
+                    serde_json::json!({ "stringValue": r.tags.join(",") }),
+                ));
+            }
+            for (k, v) in &r.data {
+                attrs.push(otlp_kv(k, otlp_any_value(v)));
+            }
+            serde_json::json!({
+                "timeUnixNano": nanos,
+                "observedTimeUnixNano": nanos,
+                "severityNumber": sev_num,
+                "severityText": sev_text,
+                "body": { "stringValue": format!("{}.{}", r.category, r.event) },
+                "attributes": attrs,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "resourceLogs": [{
+            "resource": {
+                "attributes": [
+                    otlp_kv("service.name", serde_json::json!({ "stringValue": "aft" })),
+                    otlp_kv("service.version", serde_json::json!({ "stringValue": version })),
+                    otlp_kv(
+                        "service.instance.id",
+                        serde_json::json!({ "stringValue": installation_id }),
+                    ),
+                ]
+            },
+            "scopeLogs": [{
+                "scope": { "name": "aft.telemetry", "version": version },
+                "logRecords": log_records,
+            }]
+        }]
+    })
+}
+
+// =============================================================================
 // TELEMETRY STORE (JSONL FILE STORAGE + REMOTE SYNC)
 // =============================================================================
 
@@ -604,17 +710,15 @@ impl TelemetryStore {
             });
         }
 
-        // Build the request payload
-        let payload = serde_json::json!({
-            "installation_id": self.config.installation_id,
-            "records": records,
-        });
+        // Build an OTLP/HTTP JSON logs payload: one LogRecord per telemetry
+        // record, wrapped in a single `resourceLogs` for this installation.
+        let payload = records_to_otlp_logs(&self.config.installation_id, &records);
 
-        // Send to remote endpoint
+        // Send to the collector. OTLP/HTTP logs are ingested at `/v1/logs`.
         let client = reqwest::Client::new();
         let mut request = client
             .post(format!(
-                "{}/ingest",
+                "{}/v1/logs",
                 self.config.remote_endpoint.trim_end_matches('/')
             ))
             .header("Content-Type", "application/json")
@@ -885,5 +989,43 @@ mod tests {
         assert_eq!(record.event, "test_event");
         assert_eq!(record.version, env!("CARGO_PKG_VERSION"));
         assert!(!record.id.is_empty());
+    }
+
+    #[test]
+    fn otlp_logs_payload_shape() {
+        let mut data = HashMap::new();
+        data.insert("bytes".to_string(), serde_json::json!(1024_i64));
+        data.insert("ratio".to_string(), serde_json::json!(0.5_f64));
+        data.insert("ok".to_string(), serde_json::json!(true));
+        let rec = TelemetryRecord::new("inst-1", "usage", "put", data, vec![], None);
+
+        let body = records_to_otlp_logs("inst-1", std::slice::from_ref(&rec));
+        let lr = &body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+
+        // int64 fields are encoded as decimal strings per OTLP/JSON.
+        assert!(lr["timeUnixNano"].is_string());
+        assert_eq!(lr["body"]["stringValue"], "usage.put");
+        assert_eq!(lr["severityText"], "INFO");
+
+        // resource identifies the installation.
+        let res_attrs = &body["resourceLogs"][0]["resource"]["attributes"];
+        let joined = res_attrs.to_string();
+        assert!(joined.contains("service.instance.id") && joined.contains("inst-1"));
+
+        // AnyValue typing: int → string intValue, double → number, bool → bool.
+        let attrs = lr["attributes"].as_array().unwrap();
+        let find = |k: &str| attrs.iter().find(|a| a["key"] == k).unwrap()["value"].clone();
+        assert_eq!(find("bytes")["intValue"], "1024");
+        assert_eq!(find("ratio")["doubleValue"], serde_json::json!(0.5));
+        assert_eq!(find("ok")["boolValue"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn otlp_error_category_maps_to_error_severity() {
+        let rec = TelemetryRecord::new("i", "error", "boom", HashMap::new(), vec![], None);
+        let body = records_to_otlp_logs("i", std::slice::from_ref(&rec));
+        let lr = &body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+        assert_eq!(lr["severityText"], "ERROR");
+        assert_eq!(lr["severityNumber"], 17);
     }
 }

@@ -174,7 +174,7 @@ protocol-agnostic file transfer CLI for humans and AI agents.
 | 99  | TelemetryStore with local JSONL persistence (~/.aft/telemetry_records.jsonl) | Done   |
 | 100 | TelemetryCollector convenience wrapper for batching events                   | Done   |
 | 101 | TelemetryEvent enum (commands, transfers, errors, app started)               | Done   |
-| 102 | Remote sync to AWS EC2 endpoint (reqwest async POST /ingest)                 | Done   |
+| 102 | Remote sync to OTLP/HTTP collector (reqwest async POST /v1/logs, OTLP JSON) | Done   |
 | 103 | CLI subcommand: `aft telemetry status`                                       | Done   |
 | 104 | CLI subcommand: `aft telemetry opt-in` / `opt-out`                           | Done   |
 | 105 | CLI subcommand: `aft telemetry reset` (regenerate installation ID)           | Done   |

@@ -4383,10 +4383,12 @@ mod telemetry_extended_tests {
 
     #[test]
     fn telemetry_config_is_remote_enabled() {
-        let mut config = TelemetryConfig::default();
         // Both switches on → remote sending on.
-        config.enabled = true;
-        config.remote_enabled = true;
+        let mut config = TelemetryConfig {
+            enabled: true,
+            remote_enabled: true,
+            ..TelemetryConfig::default()
+        };
         assert!(config.is_remote_enabled());
         config.remote_enabled = false;
         assert!(!config.is_remote_enabled());
