@@ -8,9 +8,13 @@
 //! personal data is collected — only aggregate usage statistics such as
 //! commands used, protocol types, transfer sizes, and error types.
 //!
-//! When enabled, data is sent to a Nervosys OpenTelemetry (OTLP/HTTP, JSON)
-//! collector as the logs signal. Users can opt back out at any time via
-//! `aft telemetry opt-out`.
+//! When enabled, data is exported to an OpenTelemetry collector as the logs
+//! signal over OTLP/HTTP. The exporter is configured entirely from the standard
+//! `OTEL_EXPORTER_OTLP_*` environment variables (endpoint, protocol, headers)
+//! plus `OTEL_SERVICE_NAME`; it defaults to `http/protobuf` and also supports
+//! `http/json`. The collector's auth token is read from
+//! `OTEL_EXPORTER_OTLP_HEADERS` at runtime and is never stored in the binary.
+//! Users can opt back out at any time via `aft telemetry opt-out`.
 
 use crate::error::{AftError, AftResult};
 use serde::{Deserialize, Serialize};
@@ -372,7 +376,11 @@ fn otlp_kv(key: &str, value: serde_json::Value) -> serde_json::Value {
 
 /// Convert telemetry records into an OTLP/HTTP JSON logs request body: a single
 /// `resourceLogs` entry for this installation, one `logRecord` per record.
-fn records_to_otlp_logs(installation_id: &str, records: &[TelemetryRecord]) -> serde_json::Value {
+fn records_to_otlp_logs(
+    service_name: &str,
+    installation_id: &str,
+    records: &[TelemetryRecord],
+) -> serde_json::Value {
     let version = env!("CARGO_PKG_VERSION");
     let log_records: Vec<serde_json::Value> = records
         .iter()
@@ -415,7 +423,7 @@ fn records_to_otlp_logs(installation_id: &str, records: &[TelemetryRecord]) -> s
         "resourceLogs": [{
             "resource": {
                 "attributes": [
-                    otlp_kv("service.name", serde_json::json!({ "stringValue": "aft" })),
+                    otlp_kv("service.name", serde_json::json!({ "stringValue": service_name })),
                     otlp_kv("service.version", serde_json::json!({ "stringValue": version })),
                     otlp_kv(
                         "service.instance.id",
@@ -429,6 +437,223 @@ fn records_to_otlp_logs(installation_id: &str, records: &[TelemetryRecord]) -> s
             }]
         }]
     })
+}
+
+// =============================================================================
+// OTLP EXPORTER CONFIG (standard OTEL_* environment variables)
+// =============================================================================
+// The exporter is configured the way any OpenTelemetry SDK would be, from the
+// standard environment variables. Crucially, the auth token is read from
+// `OTEL_EXPORTER_OTLP[_LOGS]_HEADERS` at runtime and is NEVER stored in the
+// source tree or the binary.
+
+/// OTLP/HTTP wire format, from `OTEL_EXPORTER_OTLP[_LOGS]_PROTOCOL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OtlpProtocol {
+    HttpProtobuf,
+    HttpJson,
+}
+
+/// Read a logs-signal-specific env var, falling back to the generic one.
+fn otlp_env(specific: &str, generic: &str) -> Option<String> {
+    std::env::var(specific)
+        .or_else(|_| std::env::var(generic))
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Negotiated protocol. Defaults to protobuf (the OTLP default), matching a
+/// collector configured with `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`.
+fn otlp_protocol() -> OtlpProtocol {
+    match otlp_env(
+        "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+    )
+    .as_deref()
+    {
+        Some("http/json") => OtlpProtocol::HttpJson,
+        // "http/protobuf", "grpc" (we only do HTTP), unset, or anything else.
+        _ => OtlpProtocol::HttpProtobuf,
+    }
+}
+
+/// Service name from `OTEL_SERVICE_NAME`, defaulting to `aft`.
+fn otlp_service_name() -> String {
+    std::env::var("OTEL_SERVICE_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "aft".to_string())
+}
+
+/// Resolve the logs endpoint URL.
+///
+/// Per the OTLP spec, a signal-specific `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is
+/// used verbatim, whereas the generic `OTEL_EXPORTER_OTLP_ENDPOINT` (or our
+/// stored default) is a base to which the `/v1/logs` path is appended.
+fn otlp_logs_endpoint(config_endpoint: &str) -> String {
+    if let Ok(e) = std::env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") {
+        if !e.is_empty() {
+            return e;
+        }
+    }
+    let base = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| config_endpoint.to_string());
+    format!("{}/v1/logs", base.trim_end_matches('/'))
+}
+
+/// Parse `OTEL_EXPORTER_OTLP[_LOGS]_HEADERS` — a comma-separated list of
+/// `key=value` pairs (e.g. `Authorization=Bearer abc,X-Tenant=42`) — into
+/// header pairs. `split_once('=')` keeps tokens that themselves contain `=`.
+fn otlp_headers() -> Vec<(String, String)> {
+    let raw = match otlp_env(
+        "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+    ) {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    raw.split(',')
+        .filter_map(|pair| {
+            let (k, v) = pair.trim().split_once('=')?;
+            let (k, v) = (k.trim(), v.trim());
+            if k.is_empty() {
+                None
+            } else {
+                Some((k.to_string(), v.to_string()))
+            }
+        })
+        .collect()
+}
+
+// =============================================================================
+// OTLP/HTTP PROTOBUF MAPPING
+// =============================================================================
+// Binary protobuf encoding of the same logs, for `OTEL_EXPORTER_OTLP_PROTOCOL=
+// http/protobuf`. Uses the prost message types from `opentelemetry-proto`.
+
+/// Build an OTLP `AnyValue` protobuf from a JSON value, mirroring
+/// [`otlp_any_value`] but as the typed message.
+fn otlp_any_value_pb(v: &serde_json::Value) -> opentelemetry_proto::tonic::common::v1::AnyValue {
+    use opentelemetry_proto::tonic::common::v1::{any_value::Value as PbValue, AnyValue};
+    use serde_json::Value;
+    let value = match v {
+        Value::String(s) => PbValue::StringValue(s.clone()),
+        Value::Bool(b) => PbValue::BoolValue(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                PbValue::IntValue(i)
+            } else {
+                PbValue::DoubleValue(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        Value::Null => PbValue::StringValue(String::new()),
+        other => PbValue::StringValue(other.to_string()),
+    };
+    AnyValue { value: Some(value) }
+}
+
+/// A string-valued OTLP `KeyValue` protobuf.
+fn otlp_kv_pb(key: &str, val: &str) -> opentelemetry_proto::tonic::common::v1::KeyValue {
+    use opentelemetry_proto::tonic::common::v1::{any_value::Value as PbValue, AnyValue, KeyValue};
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(PbValue::StringValue(val.to_string())),
+        }),
+    }
+}
+
+/// Encode telemetry records as a binary OTLP `ExportLogsServiceRequest`
+/// (protobuf), ready to POST as `application/x-protobuf`.
+fn records_to_otlp_protobuf(
+    service_name: &str,
+    installation_id: &str,
+    records: &[TelemetryRecord],
+) -> Vec<u8> {
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
+    use opentelemetry_proto::tonic::common::v1::{any_value::Value as PbValue, AnyValue, KeyValue};
+    use opentelemetry_proto::tonic::logs::v1::{
+        LogRecord, ResourceLogs, ScopeLogs, SeverityNumber,
+    };
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+    use prost::Message;
+
+    let version = env!("CARGO_PKG_VERSION");
+
+    let log_records: Vec<LogRecord> = records
+        .iter()
+        .map(|r| {
+            // seconds -> nanoseconds; widen so the multiply cannot overflow, then
+            // clamp back into the u64 the field expects.
+            let nanos = (r.timestamp as i128 * 1_000_000_000).clamp(0, u64::MAX as i128) as u64;
+            let (sev, sev_text) = if r.category.eq_ignore_ascii_case("error") {
+                (SeverityNumber::Error, "ERROR")
+            } else {
+                (SeverityNumber::Info, "INFO")
+            };
+            let mut attributes = vec![
+                otlp_kv_pb("category", &r.category),
+                otlp_kv_pb("event", &r.event),
+                otlp_kv_pb("record.id", &r.id),
+            ];
+            if let Some(ctx) = &r.context {
+                attributes.push(otlp_kv_pb("context", ctx));
+            }
+            if !r.tags.is_empty() {
+                attributes.push(otlp_kv_pb("tags", &r.tags.join(",")));
+            }
+            for (k, v) in &r.data {
+                attributes.push(KeyValue {
+                    key: k.clone(),
+                    value: Some(otlp_any_value_pb(v)),
+                });
+            }
+            LogRecord {
+                time_unix_nano: nanos,
+                observed_time_unix_nano: nanos,
+                severity_number: sev as i32,
+                severity_text: sev_text.to_string(),
+                body: Some(AnyValue {
+                    value: Some(PbValue::StringValue(format!("{}.{}", r.category, r.event))),
+                }),
+                attributes,
+                dropped_attributes_count: 0,
+                flags: 0,
+                trace_id: Vec::new(),
+                span_id: Vec::new(),
+            }
+        })
+        .collect();
+
+    let resource = Resource {
+        attributes: vec![
+            otlp_kv_pb("service.name", service_name),
+            otlp_kv_pb("service.version", version),
+            otlp_kv_pb("service.instance.id", installation_id),
+        ],
+        dropped_attributes_count: 0,
+    };
+
+    let request = ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            resource: Some(resource),
+            scope_logs: vec![ScopeLogs {
+                scope: Some(InstrumentationScope {
+                    name: "aft.telemetry".to_string(),
+                    version: version.to_string(),
+                    ..Default::default()
+                }),
+                log_records,
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    };
+
+    request.encode_to_vec()
 }
 
 // =============================================================================
@@ -710,26 +935,47 @@ impl TelemetryStore {
             });
         }
 
-        // Build an OTLP/HTTP JSON logs payload: one LogRecord per telemetry
-        // record, wrapped in a single `resourceLogs` for this installation.
-        let payload = records_to_otlp_logs(&self.config.installation_id, &records);
+        // Resolve the exporter configuration from the standard OpenTelemetry
+        // environment variables, falling back to the stored config. This is why
+        // the auth token is never baked into the binary: it arrives at runtime
+        // via `OTEL_EXPORTER_OTLP_HEADERS` (e.g. `Authorization=Bearer …`).
+        let service_name = otlp_service_name();
+        let protocol = otlp_protocol();
+        let url = otlp_logs_endpoint(&self.config.remote_endpoint);
 
-        // Send to the collector. OTLP/HTTP logs are ingested at `/v1/logs`.
+        // Encode the batch in the negotiated wire format.
+        let (body, content_type) = match protocol {
+            OtlpProtocol::HttpProtobuf => (
+                records_to_otlp_protobuf(&service_name, &self.config.installation_id, &records),
+                "application/x-protobuf",
+            ),
+            OtlpProtocol::HttpJson => {
+                let json =
+                    records_to_otlp_logs(&service_name, &self.config.installation_id, &records);
+                (
+                    serde_json::to_vec(&json).unwrap_or_default(),
+                    "application/json",
+                )
+            }
+        };
+
         let client = reqwest::Client::new();
         let mut request = client
-            .post(format!(
-                "{}/v1/logs",
-                self.config.remote_endpoint.trim_end_matches('/')
-            ))
-            .header("Content-Type", "application/json")
+            .post(url)
+            .header("Content-Type", content_type)
             .header("User-Agent", format!("aft/{}", env!("CARGO_PKG_VERSION")));
 
-        // Add API key if configured
+        // Headers from OTEL_EXPORTER_OTLP[_LOGS]_HEADERS (auth lives here).
+        for (k, v) in otlp_headers() {
+            request = request.header(k, v);
+        }
+        // Back-compat: an API key stored in the telemetry config still applies
+        // (skipped if an Authorization header was already supplied via env).
         if let Some(ref api_key) = self.config.remote_api_key {
             request = request.header("X-Api-Key", api_key);
         }
 
-        let response = request.json(&payload).send().await;
+        let response = request.body(body).send().await;
 
         match response {
             Ok(resp) => {
@@ -999,7 +1245,7 @@ mod tests {
         data.insert("ok".to_string(), serde_json::json!(true));
         let rec = TelemetryRecord::new("inst-1", "usage", "put", data, vec![], None);
 
-        let body = records_to_otlp_logs("inst-1", std::slice::from_ref(&rec));
+        let body = records_to_otlp_logs("aft", "inst-1", std::slice::from_ref(&rec));
         let lr = &body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
 
         // int64 fields are encoded as decimal strings per OTLP/JSON.
@@ -1023,9 +1269,63 @@ mod tests {
     #[test]
     fn otlp_error_category_maps_to_error_severity() {
         let rec = TelemetryRecord::new("i", "error", "boom", HashMap::new(), vec![], None);
-        let body = records_to_otlp_logs("i", std::slice::from_ref(&rec));
+        let body = records_to_otlp_logs("aft", "i", std::slice::from_ref(&rec));
         let lr = &body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
         assert_eq!(lr["severityText"], "ERROR");
         assert_eq!(lr["severityNumber"], 17);
+    }
+
+    #[test]
+    fn otlp_protobuf_decodes_back_to_the_records() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use opentelemetry_proto::tonic::logs::v1::SeverityNumber;
+        use prost::Message;
+
+        let mut data = HashMap::new();
+        data.insert("bytes".to_string(), serde_json::json!(2048_i64));
+        let rec = TelemetryRecord::new("inst-9", "error", "boom", data, vec![], None);
+
+        let bytes = records_to_otlp_protobuf("my-app", "inst-9", std::slice::from_ref(&rec));
+        // Round-trips through the wire format.
+        let req = ExportLogsServiceRequest::decode(bytes.as_slice()).unwrap();
+        let rl = &req.resource_logs[0];
+        let lr = &rl.scope_logs[0].log_records[0];
+
+        assert_eq!(lr.severity_number, SeverityNumber::Error as i32);
+        // Resource carries the OTEL_SERVICE_NAME we passed.
+        let svc = rl
+            .resource
+            .as_ref()
+            .unwrap()
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "service.name")
+            .and_then(|kv| kv.value.clone())
+            .unwrap();
+        assert!(matches!(
+            svc.value,
+            Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(ref s)) if s == "my-app"
+        ));
+        // The int attribute survives as an OTLP intValue.
+        let bytes_attr = lr.attributes.iter().find(|kv| kv.key == "bytes").unwrap();
+        assert!(matches!(
+            bytes_attr.value.as_ref().unwrap().value,
+            Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(2048))
+        ));
+    }
+
+    #[test]
+    fn otlp_headers_parse_bearer_with_spaces_and_multiple_pairs() {
+        std::env::set_var(
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "Authorization=Bearer abc.def-ghi,X-Tenant=42",
+        );
+        let hdrs = otlp_headers();
+        std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
+        assert!(hdrs.contains(&(
+            "Authorization".to_string(),
+            "Bearer abc.def-ghi".to_string()
+        )));
+        assert!(hdrs.contains(&("X-Tenant".to_string(), "42".to_string())));
     }
 }

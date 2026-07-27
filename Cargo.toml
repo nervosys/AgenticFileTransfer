@@ -106,6 +106,18 @@ ml-kem = { version = "0.3", features = ["getrandom"] }
 # AES-256-GCM authenticated encryption
 aes-gcm = "0.10"
 
+# OTLP (OpenTelemetry) protobuf message types for telemetry export
+# (src/telemetry.rs). `gen-tonic-messages` provides the prost-generated structs
+# (we encode them ourselves and POST over HTTP — no gRPC/tonic transport); the
+# `logs` feature gates the logs signal's message types. It transitively pulls
+# opentelemetry + opentelemetry_sdk (the crate's logs conversions); we use only
+# the message structs.
+opentelemetry-proto = { version = "0.27", default-features = false, features = [
+    "gen-tonic-messages",
+    "logs",
+] }
+prost = "0.13"
+
 # Hardware-accelerated CRC32 (SSE4.2 on x86_64, CRC32 on aarch64)
 crc32fast = "1.4"
 
