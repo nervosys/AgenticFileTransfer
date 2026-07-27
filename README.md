@@ -1,4 +1,6 @@
-# AFT — Agentic File Transfer
+<p align="center">
+  <img src="media/banner.png" alt="AFT — Agentic File Transfer" width="100%">
+</p>
 
 **High-performance, protocol-agnostic file transfer CLI for humans and AI agents.**
 
