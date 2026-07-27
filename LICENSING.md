@@ -42,7 +42,7 @@ source-disclosure obligations in exchange for commercial terms, and can include
 options such as warranty, indemnification, and support.
 
 See [`COMMERCIAL-LICENSE.md`](COMMERCIAL-LICENSE.md) for a summary, and contact
-**licensing@nervosys.com** to obtain one.
+**licensing@nervosys.ai** to obtain one.
 
 ---
 
@@ -59,7 +59,7 @@ See [`COMMERCIAL-LICENSE.md`](COMMERCIAL-LICENSE.md) for a summary, and contact
 
 This table is guidance, not legal advice. If you are unsure whether your use
 triggers AGPL obligations, consult your own counsel or email
-**licensing@nervosys.com**.
+**licensing@nervosys.ai**.
 
 ---
 

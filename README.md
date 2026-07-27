@@ -769,6 +769,6 @@ As publicly available open-source encryption source code, AFT is eligible for ex
 AFT is **dual-licensed** — see [LICENSING.md](LICENSING.md) for the full explanation:
 
 - **AGPL-3.0-or-later** (default) — free for open-source use under the [GNU Affero General Public License v3.0](LICENSE). Note the AGPL's network clause (§13): if you run a modified AFT as a network service, you must offer that service's users the corresponding source.
-- **Commercial License** — for proprietary or SaaS use **without** AGPL's copyleft/source-disclosure obligations. See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) and contact **licensing@nervosys.com**.
+- **Commercial License** — for proprietary or SaaS use **without** AGPL's copyleft/source-disclosure obligations. See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) and contact **licensing@nervosys.ai**.
 
 Copyright © 2024–2026 Nervosys, LLC. `SPDX-License-Identifier: AGPL-3.0-or-later`.

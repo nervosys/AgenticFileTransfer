@@ -38,7 +38,7 @@ signed agreement.
 
 ## How to obtain one
 
-Email **licensing@nervosys.com** with:
+Email **licensing@nervosys.ai** with:
 
 1. your company / legal entity name,
 2. a short description of your intended use (product, SaaS, redistribution, etc.),

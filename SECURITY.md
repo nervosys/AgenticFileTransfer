@@ -8,7 +8,7 @@ Report them privately via one of:
 
 - GitHub's [private vulnerability reporting](https://github.com/nervosys/AgenticFileTransfer/security/advisories/new)
   ("Report a vulnerability" under the repository's **Security** tab), or
-- email **security@nervosys.com**.
+- email **security@nervosys.ai**.
 
 Please include:
 
