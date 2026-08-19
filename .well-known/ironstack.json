@@ -1,0 +1,162 @@
+{
+  "ironstack": "1",
+  "id": "aft",
+  "product": "AgenticFileTransfer",
+  "layer": "tools",
+  "role": "Protocol-agnostic high-performance file transfer with structured output.",
+  "surfaces": [
+    "cli"
+  ],
+  "ontology": {
+    "command": "aft schema",
+    "document": "src/ontology.rs (JSON-LD)",
+    "schema": 1
+  },
+  "capabilities": [
+    {
+      "name": "head",
+      "description": "Show the first bytes of a remote or local file.",
+      "requires_grant": false,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "list",
+      "description": "List entries at a path.",
+      "requires_grant": false,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "schema",
+      "description": "Emit the JSON-LD ontology for agent discovery.",
+      "requires_grant": false,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "capabilities",
+      "description": "Report which protocols and features this build supports.",
+      "requires_grant": false,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "checksum",
+      "description": "Hash a file. Reads it in full.",
+      "requires_grant": false,
+      "budgeted": true,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "get",
+      "description": "Fetch a remote file to a local path.",
+      "requires_grant": true,
+      "budgeted": true,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "put",
+      "description": "Upload a local file to a remote path.",
+      "requires_grant": true,
+      "budgeted": true,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "copy",
+      "description": "Copy between two locations.",
+      "requires_grant": true,
+      "budgeted": true,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "move",
+      "description": "Move a file. The source does not survive.",
+      "requires_grant": true,
+      "budgeted": true,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "sync",
+      "description": "Reconcile a directory tree against another. Scope is the tree, not one file.",
+      "requires_grant": true,
+      "budgeted": true,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "mkdir",
+      "description": "Create a directory.",
+      "requires_grant": true,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "remove",
+      "description": "Delete a file or directory.",
+      "requires_grant": true,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "serve",
+      "description": "Serve files over the network until stopped.",
+      "requires_grant": true,
+      "budgeted": true,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "plugin",
+      "description": "Load or unload a plugin -- executable code entering the process.",
+      "requires_grant": true,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "crypto",
+      "description": "Key generation, encryption and decryption.",
+      "requires_grant": true,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "telemetry",
+      "description": "Inspect or change telemetry opt-in state.",
+      "requires_grant": true,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    }
+  ],
+  "note": "Neither field is derived. This tool enumerates its commands but declares no effect, safety or authority data, so requires_grant and budgeted are judgements made from command semantics and are labelled as such rather than presented as the tool's own position. Replace this file with a derived one if the tool ever declares effects, the way abt, Rodeo, Botnet, MAGE and HyperMachine do. The rule applied: a grant is required to write, delete, move, serve, load code, or touch keys or telemetry state. remove and move are granted because the source does not survive either; head, list, schema, capabilities and checksum only read. plugin is granted because loading a plugin puts executable code into the process, which is a larger authority than any file operation here. Budgets follow bytes moved or time served, so checksum is budgeted while ungranted -- it reads a whole file without needing permission to."
+}
