@@ -41,6 +41,63 @@ pub struct OperationSchema {
     pub usage: String,
     pub parameters: Vec<ParameterSchema>,
     pub returns: String,
+    /// What running this does, for an agent deciding whether it may.
+    ///
+    /// Defaulted rather than required at every construction site so the
+    /// existing operations did not all have to be rewritten at once; the
+    /// default is the restrictive one, so an operation added without a
+    /// classification reads as dangerous rather than safe.
+    #[serde(default)]
+    pub effects: OperationEffects,
+}
+
+/// The effects of one operation.
+///
+/// `destroys` is separated from `mutates` deliberately. Writing a file and
+/// deleting one are both mutations, but only the second loses data the caller
+/// did not create -- and `remove` and `move` are exactly the two operations
+/// that were missing from this ontology entirely, so an agent reading it
+/// would have concluded aft cannot delete anything.
+#[derive(Serialize, Debug, Clone)]
+pub struct OperationEffects {
+    /// Writes to a destination: a local path, a remote target, or a device.
+    pub mutates: bool,
+    /// Data the caller did not create does not survive the operation.
+    pub destroys: bool,
+    /// Reaches the network, either outbound or by listening.
+    pub network: bool,
+    /// Loads code into the process, or changes what code will be loaded.
+    pub loads_code: bool,
+}
+
+impl Default for OperationEffects {
+    /// The restrictive default: an unclassified operation is treated as doing
+    /// everything, so forgetting to declare is a visible failure rather than
+    /// a silent claim of safety.
+    fn default() -> Self {
+        Self {
+            mutates: true,
+            destroys: true,
+            network: true,
+            loads_code: true,
+        }
+    }
+}
+
+impl OperationEffects {
+    const fn new(mutates: bool, destroys: bool, network: bool, loads_code: bool) -> Self {
+        Self {
+            mutates,
+            destroys,
+            network,
+            loads_code,
+        }
+    }
+
+    /// Reads something and changes nothing.
+    const fn read_only(network: bool) -> Self {
+        Self::new(false, false, network, false)
+    }
 }
 
 #[derive(Serialize)]
@@ -134,6 +191,7 @@ pub fn generate_schema() -> OntologySchema {
                     ParameterSchema { name: "--max-redirects".to_string(), type_: "integer".to_string(), required: false, description: "Max HTTP redirects".to_string(), default: Some("10".to_string()) },
                 ],
                 returns: "TransferResult with bytes_transferred, duration_ms, throughput, checksum".to_string(),
+                effects: OperationEffects::new(true, false, true, false),
             },
             OperationSchema {
                 name: "put".to_string(),
@@ -146,6 +204,7 @@ pub fn generate_schema() -> OntologySchema {
                     ParameterSchema { name: "--method".to_string(), type_: "enum(PUT, POST, PATCH)".to_string(), required: false, description: "HTTP method".to_string(), default: Some("PUT".to_string()) },
                 ],
                 returns: "TransferResult".to_string(),
+                effects: OperationEffects::new(true, false, true, false),
             },
             OperationSchema {
                 name: "copy".to_string(),
@@ -157,6 +216,7 @@ pub fn generate_schema() -> OntologySchema {
                     ParameterSchema { name: "--recursive / -r".to_string(), type_: "bool".to_string(), required: false, description: "Recurse into directories".to_string(), default: Some("false".to_string()) },
                 ],
                 returns: "TransferResult".to_string(),
+                effects: OperationEffects::new(true, false, true, false),
             },
             OperationSchema {
                 name: "head".to_string(),
@@ -166,6 +226,7 @@ pub fn generate_schema() -> OntologySchema {
                     ParameterSchema { name: "url".to_string(), type_: "string".to_string(), required: true, description: "URL to inspect".to_string(), default: None },
                 ],
                 returns: "ResourceMetadata with content_length, content_type, last_modified, etag, headers".to_string(),
+                effects: OperationEffects::new(false, false, true, false),
             },
             OperationSchema {
                 name: "ls".to_string(),
@@ -175,6 +236,7 @@ pub fn generate_schema() -> OntologySchema {
                     ParameterSchema { name: "url".to_string(), type_: "string".to_string(), required: true, description: "Directory URL or path".to_string(), default: None },
                 ],
                 returns: "Array of DirectoryEntry with name, size, is_directory, last_modified".to_string(),
+                effects: OperationEffects::new(false, false, true, false),
             },
             OperationSchema {
                 name: "checksum".to_string(),
@@ -185,6 +247,7 @@ pub fn generate_schema() -> OntologySchema {
                     ParameterSchema { name: "--algorithm / -a".to_string(), type_: "enum(sha256, sha512, md5)".to_string(), required: false, description: "Hash algorithm".to_string(), default: Some("sha256".to_string()) },
                 ],
                 returns: "ChecksumResult with algorithm, value".to_string(),
+                effects: OperationEffects::new(false, false, false, false),
             },
             OperationSchema {
                 name: "schema".to_string(),
@@ -192,6 +255,7 @@ pub fn generate_schema() -> OntologySchema {
                 usage: "aft schema".to_string(),
                 parameters: vec![],
                 returns: "OntologySchema JSON document".to_string(),
+                effects: OperationEffects::new(false, false, false, false),
             },
             OperationSchema {
                 name: "capabilities".to_string(),
@@ -199,6 +263,7 @@ pub fn generate_schema() -> OntologySchema {
                 usage: "aft capabilities".to_string(),
                 parameters: vec![],
                 returns: "Capabilities report".to_string(),
+                effects: OperationEffects::new(false, false, false, false),
             },
             OperationSchema {
                 name: "serve".to_string(),
@@ -212,6 +277,7 @@ pub fn generate_schema() -> OntologySchema {
                     ParameterSchema { name: "--compression".to_string(), type_: "bool".to_string(), required: false, description: "Enable zstd compression".to_string(), default: Some("false".to_string()) },
                 ],
                 returns: "Server status (runs until interrupted)".to_string(),
+                effects: OperationEffects::new(false, false, true, false),
             },
             OperationSchema {
                 name: "crypto".to_string(),
@@ -226,6 +292,7 @@ pub fn generate_schema() -> OntologySchema {
                     ParameterSchema { name: "--cipher".to_string(), type_: "enum(mlkem, neural)".to_string(), required: false, description: "Cipher to use (\"kyber\" accepted as a legacy alias for mlkem)".to_string(), default: Some("mlkem".to_string()) },
                 ],
                 returns: "CryptoResult with operation, cipher, input_size, output_size".to_string(),
+                effects: OperationEffects::new(true, false, false, false),
             },
             OperationSchema {
                 name: "telemetry".to_string(),
@@ -235,6 +302,65 @@ pub fn generate_schema() -> OntologySchema {
                     ParameterSchema { name: "action".to_string(), type_: "enum(status, opt-in, opt-out, reset, sync, clear, export, config)".to_string(), required: true, description: "Telemetry management action".to_string(), default: None },
                 ],
                 returns: "Telemetry status or action confirmation".to_string(),
+                effects: OperationEffects::new(true, false, true, false),
+            },
+            // Added because the ontology declared eleven of aft's sixteen
+            // commands. The five below were absent, and two of them --
+            // `remove` and `move` -- are the only operations that lose data,
+            // so an agent trusting this document as complete would have
+            // concluded aft cannot delete anything.
+            OperationSchema {
+                name: "sync".to_string(),
+                description: "Reconcile a directory tree against another, transferring only what differs".to_string(),
+                usage: "aft sync <source> <destination>".to_string(),
+                parameters: vec![
+                    ParameterSchema { name: "source".to_string(), type_: "string".to_string(), required: true, description: "Source directory or URL".to_string(), default: None },
+                    ParameterSchema { name: "destination".to_string(), type_: "string".to_string(), required: true, description: "Destination directory or URL".to_string(), default: None },
+                ],
+                returns: "SyncResult with counts of transferred, skipped and deleted entries".to_string(),
+                effects: OperationEffects::new(true, true, true, false),
+            },
+            OperationSchema {
+                name: "mv".to_string(),
+                description: "Move a file or directory. The source does not survive".to_string(),
+                usage: "aft mv <source> <destination>".to_string(),
+                parameters: vec![
+                    ParameterSchema { name: "source".to_string(), type_: "string".to_string(), required: true, description: "Source path or URL".to_string(), default: None },
+                    ParameterSchema { name: "destination".to_string(), type_: "string".to_string(), required: true, description: "Destination path or URL".to_string(), default: None },
+                ],
+                returns: "TransferResult".to_string(),
+                effects: OperationEffects::new(true, true, true, false),
+            },
+            OperationSchema {
+                name: "rm".to_string(),
+                description: "Delete a file or directory".to_string(),
+                usage: "aft rm <path>".to_string(),
+                parameters: vec![
+                    ParameterSchema { name: "path".to_string(), type_: "string".to_string(), required: true, description: "Path or URL to delete".to_string(), default: None },
+                ],
+                returns: "Confirmation of what was removed".to_string(),
+                effects: OperationEffects::new(true, true, true, false),
+            },
+            OperationSchema {
+                name: "mkdir".to_string(),
+                description: "Create a directory".to_string(),
+                usage: "aft mkdir <path>".to_string(),
+                parameters: vec![
+                    ParameterSchema { name: "path".to_string(), type_: "string".to_string(), required: true, description: "Directory path or URL to create".to_string(), default: None },
+                ],
+                returns: "Confirmation of what was created".to_string(),
+                effects: OperationEffects::new(true, false, true, false),
+            },
+            OperationSchema {
+                name: "plugin".to_string(),
+                description: "Load or unload a protocol plugin".to_string(),
+                usage: "aft plugin <action> [name]".to_string(),
+                parameters: vec![
+                    ParameterSchema { name: "action".to_string(), type_: "enum(list, load, unload)".to_string(), required: true, description: "What to do with the plugin registry".to_string(), default: None },
+                    ParameterSchema { name: "name".to_string(), type_: "string".to_string(), required: false, description: "Plugin name, for load and unload".to_string(), default: None },
+                ],
+                returns: "The plugin registry after the action".to_string(),
+                effects: OperationEffects::new(true, false, false, true),
             },
         ],
 
@@ -431,6 +557,101 @@ pub fn print_capabilities(format: Format) {
                 "aft schema".yellow().bold()
             );
             println!();
+        }
+    }
+}
+
+#[cfg(test)]
+mod completeness {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Every command aft accepts has an ontology entry.
+    ///
+    /// Walks clap's own parsed `Command`, so an operation cannot be added to
+    /// the CLI without appearing here. This test exists because the ontology
+    /// declared eleven of sixteen commands while presenting itself as the
+    /// agent-facing capability document, and the five it omitted included
+    /// `remove` and `move` -- the only two that lose data.
+    #[test]
+    fn every_command_has_an_operation() {
+        let schema = generate_schema();
+        let declared: std::collections::HashSet<String> =
+            schema.operations.iter().map(|o| o.name.clone()).collect();
+
+        let command = crate::cli::Cli::command();
+        let missing: Vec<String> = command
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .filter(|name| !declared.contains(name))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "these commands exist but have no ontology operation: {missing:?}"
+        );
+    }
+
+    /// Nothing is declared that cannot be run.
+    #[test]
+    fn no_operation_names_a_missing_command() {
+        let command = crate::cli::Cli::command();
+        let real: std::collections::HashSet<String> = command
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .collect();
+
+        let phantom: Vec<String> = generate_schema()
+            .operations
+            .into_iter()
+            .map(|o| o.name)
+            .filter(|name| !real.contains(name))
+            .collect();
+
+        assert!(
+            phantom.is_empty(),
+            "these operations name no real command: {phantom:?}"
+        );
+    }
+
+    /// The operations that lose data say so.
+    ///
+    /// Pinned by name: `destroys` is the claim an agent acts on before it
+    /// runs something irreversible, and these three are the operations where
+    /// data the caller did not create does not survive.
+    #[test]
+    fn destructive_operations_declare_it() {
+        let schema = generate_schema();
+        for name in ["rm", "mv", "sync"] {
+            let op = schema
+                .operations
+                .iter()
+                .find(|o| o.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is missing from the ontology"));
+            assert!(
+                op.effects.destroys,
+                "`{name}` loses data but does not declare `destroys`"
+            );
+        }
+    }
+
+    /// Reading something never claims to destroy it.
+    ///
+    /// The guard against the opposite failure: a default that marks
+    /// everything dangerous would pass the test above while making the field
+    /// useless, since an agent that cannot distinguish `head` from `remove`
+    /// gains nothing from either.
+    #[test]
+    fn read_only_operations_are_not_marked_destructive() {
+        let schema = generate_schema();
+        for name in ["head", "ls", "checksum", "schema", "capabilities"] {
+            let op = schema.operations.iter().find(|o| o.name == name);
+            if let Some(op) = op {
+                assert!(
+                    !op.effects.destroys && !op.effects.mutates,
+                    "`{name}` only reads but is declared as changing something"
+                );
+            }
         }
     }
 }

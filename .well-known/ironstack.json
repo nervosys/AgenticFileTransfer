@@ -14,53 +14,8 @@
   },
   "capabilities": [
     {
-      "name": "head",
-      "description": "Show the first bytes of a remote or local file.",
-      "requires_grant": false,
-      "budgeted": false,
-      "surfaces": [
-        "cli"
-      ]
-    },
-    {
-      "name": "list",
-      "description": "List entries at a path.",
-      "requires_grant": false,
-      "budgeted": false,
-      "surfaces": [
-        "cli"
-      ]
-    },
-    {
-      "name": "schema",
-      "description": "Emit the JSON-LD ontology for agent discovery.",
-      "requires_grant": false,
-      "budgeted": false,
-      "surfaces": [
-        "cli"
-      ]
-    },
-    {
-      "name": "capabilities",
-      "description": "Report which protocols and features this build supports.",
-      "requires_grant": false,
-      "budgeted": false,
-      "surfaces": [
-        "cli"
-      ]
-    },
-    {
-      "name": "checksum",
-      "description": "Hash a file. Reads it in full.",
-      "requires_grant": false,
-      "budgeted": true,
-      "surfaces": [
-        "cli"
-      ]
-    },
-    {
       "name": "get",
-      "description": "Fetch a remote file to a local path.",
+      "description": "Download a file from a URL to local storage. Declares: mutates, destroys, network, loads_code.",
       "requires_grant": true,
       "budgeted": true,
       "surfaces": [
@@ -69,7 +24,7 @@
     },
     {
       "name": "put",
-      "description": "Upload a local file to a remote path.",
+      "description": "Upload a local file to a remote URL. Declares: mutates, network.",
       "requires_grant": true,
       "budgeted": true,
       "surfaces": [
@@ -78,7 +33,7 @@
     },
     {
       "name": "copy",
-      "description": "Copy between two locations.",
+      "description": "Copy files between any two locations (local or remote). Declares: mutates, network.",
       "requires_grant": true,
       "budgeted": true,
       "surfaces": [
@@ -86,36 +41,45 @@
       ]
     },
     {
-      "name": "move",
-      "description": "Move a file. The source does not survive.",
-      "requires_grant": true,
-      "budgeted": true,
-      "surfaces": [
-        "cli"
-      ]
-    },
-    {
-      "name": "sync",
-      "description": "Reconcile a directory tree against another. Scope is the tree, not one file.",
-      "requires_grant": true,
-      "budgeted": true,
-      "surfaces": [
-        "cli"
-      ]
-    },
-    {
-      "name": "mkdir",
-      "description": "Create a directory.",
-      "requires_grant": true,
+      "name": "head",
+      "description": "Inspect remote resource metadata without downloading. Declares: network.",
+      "requires_grant": false,
       "budgeted": false,
       "surfaces": [
         "cli"
       ]
     },
     {
-      "name": "remove",
-      "description": "Delete a file or directory.",
-      "requires_grant": true,
+      "name": "ls",
+      "description": "List contents of a remote or local directory. Declares: network.",
+      "requires_grant": false,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "checksum",
+      "description": "Compute checksum of a local file. Declares: no effects.",
+      "requires_grant": false,
+      "budgeted": true,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "schema",
+      "description": "Output the full agentic ontology schema as JSON. Declares: no effects.",
+      "requires_grant": false,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "capabilities",
+      "description": "List available protocols, operations, and features. Declares: no effects.",
+      "requires_grant": false,
       "budgeted": false,
       "surfaces": [
         "cli"
@@ -123,25 +87,16 @@
     },
     {
       "name": "serve",
-      "description": "Serve files over the network until stopped.",
-      "requires_grant": true,
+      "description": "Start an AFTP file server for high-performance binary transfers. Declares: network.",
+      "requires_grant": false,
       "budgeted": true,
       "surfaces": [
         "cli"
       ]
     },
     {
-      "name": "plugin",
-      "description": "Load or unload a plugin -- executable code entering the process.",
-      "requires_grant": true,
-      "budgeted": false,
-      "surfaces": [
-        "cli"
-      ]
-    },
-    {
       "name": "crypto",
-      "description": "Key generation, encryption and decryption.",
+      "description": "Quantum-resistant cryptographic operations (ML-KEM-1024 + AES-256-GCM, neural network cipher). Declares: mutates.",
       "requires_grant": true,
       "budgeted": false,
       "surfaces": [
@@ -150,7 +105,52 @@
     },
     {
       "name": "telemetry",
-      "description": "Inspect or change telemetry opt-in state.",
+      "description": "Manage anonymous usage telemetry collection and reporting. Declares: mutates, network.",
+      "requires_grant": true,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "sync",
+      "description": "Reconcile a directory tree against another, transferring only what differs. Declares: mutates, destroys, network.",
+      "requires_grant": true,
+      "budgeted": true,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "mv",
+      "description": "Move a file or directory. The source does not survive. Declares: mutates, destroys, network.",
+      "requires_grant": true,
+      "budgeted": true,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "rm",
+      "description": "Delete a file or directory. Declares: mutates, destroys, network.",
+      "requires_grant": true,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "mkdir",
+      "description": "Create a directory. Declares: mutates, network.",
+      "requires_grant": true,
+      "budgeted": false,
+      "surfaces": [
+        "cli"
+      ]
+    },
+    {
+      "name": "plugin",
+      "description": "Load or unload a protocol plugin. Declares: mutates, loads_code.",
       "requires_grant": true,
       "budgeted": false,
       "surfaces": [
@@ -158,5 +158,5 @@
       ]
     }
   ],
-  "note": "Neither field is derived. This tool enumerates its commands but declares no effect, safety or authority data, so requires_grant and budgeted are judgements made from command semantics and are labelled as such rather than presented as the tool's own position. Replace this file with a derived one if the tool ever declares effects, the way abt, Rodeo, Botnet, MAGE and HyperMachine do. The rule applied: a grant is required to write, delete, move, serve, load code, or touch keys or telemetry state. remove and move are granted because the source does not survive either; head, list, schema, capabilities and checksum only read. plugin is granted because loading a plugin puts executable code into the process, which is a larger authority than any file operation here. Budgets follow bytes moved or time served, so checksum is budgeted while ungranted -- it reads a whole file without needing permission to."
+  "note": "requires_grant is now DERIVED from the effects aft declares per operation -- mutates, destroys, network, loads_code -- and is true where an operation writes or loads code. An earlier version of this file said both fields were judgement, which was true when written; the tool now declares them. The ontology also covers all sixteen commands. It covered eleven, and the five it omitted included rm and mv, so an agent reading it as complete would have concluded aft cannot delete anything. Two tests now walk clap's parsed Command in both directions -- which immediately caught that the operations were named `move` and `remove` while the commands are `mv` and `rm`, an entry that would have looked correct and matched nothing. destroys is kept separate from mutates on purpose: writing a file and deleting one are both mutations, but only the second loses data the caller did not create. sync declares destroys because reconciling a tree removes entries absent from the source. loads_code is declared only by plugin, and is why plugin requires a grant despite touching no file the caller named -- it is the one operation that puts new executable code into the process. Budgets are judged and mark the operations whose cost scales with bytes moved or time served."
 }
