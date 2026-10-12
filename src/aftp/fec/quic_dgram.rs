@@ -231,9 +231,11 @@ pub fn dev_server_endpoint(addr: std::net::SocketAddr) -> AftResult<quinn::Endpo
     let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
 
     // Pinned to ring, not the process default. The rest of AFT installs
-    // ic-rustls as the default provider, and QUIC handshakes fail under
-    // ic-rustls's packet protection (its AEAD/header-protection path), so this
-    // data plane stays on ring until that is fixed upstream.
+    // ic-rustls as the default provider. A QUIC handshake fails when its two
+    // ends use different providers (ring server with ic client, or the
+    // reverse), and succeeds when both use the same one. Staying on ring keeps
+    // this data plane compatible with 2.0.0 peers. Switching it to ic-rustls
+    // would break that until every peer has been upgraded.
     let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))

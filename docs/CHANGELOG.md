@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--features fips` now runs IronCrypto's FIPS self-tests** and refuses to start
   if they fail. It is **no longer FIPS-validated**: IronCrypto has no CMVP
   certificate, and the `aws-lc-rs` validated boundary (certificate #4631) is gone.
-- The `--fec` QUIC data plane stays on `ring`. Its handshakes fail under
-  `ic-rustls`'s packet protection, so it is pinned explicitly and not affected by
+- The `--fec` QUIC data plane stays on `ring`. A QUIC handshake fails when the
+  two ends use different providers, so moving it to `ic-rustls` would break
+  interop with 2.0.0 peers. It is pinned explicitly and not affected by
   the process default provider.
 
 ## [2.0.0] - 2026-07-27

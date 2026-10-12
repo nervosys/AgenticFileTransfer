@@ -573,7 +573,10 @@ bytes, and the PQC path was checked by opening ciphertexts and secret keys made 
 the previous build. Peers on the old and new builds interoperate.
 
 QUIC (`--fec` over QUIC, `src/aftp/fec/quic_dgram.rs`) is the exception: it stays
-on `ring` because QUIC handshakes fail under `ic-rustls`'s packet protection.
+on `ring` because a QUIC handshake fails when its two ends use different TLS
+providers. Moving it to `ic-rustls` would break interop with 2.0.0 peers until
+they are upgraded. Both-ends-`ic-rustls` QUIC works in a loopback test, and it
+is not yet verified against other QUIC stacks.
 Other transitive dependencies also still link `ring` or `aws-lc-rs` (`rcgen`,
 `russh`, `rust-s3`, `quinn`). AFT's own code does not select them.
 
