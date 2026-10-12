@@ -14,26 +14,28 @@
 //!
 //! Earlier versions used the unmaintained `pqc_kyber` crate (round-3 Kyber1024,
 //! affected by the KyberSlash timing side-channel with no upstream fix). This
-//! module now uses RustCrypto's maintained `ml-kem`. ML-KEM-1024 (FIPS 203
+//! module now uses IronCrypto's `ic-mlkem`. ML-KEM-1024 (FIPS 203
 //! final) is **not** interoperable with the old round-3 Kyber1024, so the key
 //! file version was bumped to 2 and legacy (version-1) files are rejected with
 //! a clear error — regenerate them with `aft keygen`.
 
 use std::path::Path;
 
-use aes_gcm::aead::{Aead, KeyInit as AeadKeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
-use ml_kem::kem::{Decapsulate, Encapsulate};
-use ml_kem::ml_kem_1024::{Ciphertext, DecapsulationKey, EncapsulationKey};
-use ml_kem::{Kem, KeyExport, KeyInit, MlKem1024, TryKeyInit};
-use rand::RngCore;
+use ic_mlkem::kem1024::{
+    CIPHERTEXT_LEN, DECAPS_KEY_LEN, ENCAPS_KEY_LEN, SHARED_SECRET_LEN,
+};
+use ic_mlkem::MlKem1024;
 
+use super::primitives::{self, GCM_NONCE_LEN};
 use crate::error::{AftError, AftResult};
+
+/// Length of the secret-key payload: the FIPS 203 seed `d || z`.
+const SEED_LEN: usize = 64;
 
 const PUB_KEY_MAGIC: &[u8; 4] = b"AFPK";
 const SEC_KEY_MAGIC: &[u8; 4] = b"AFSK";
 /// Key-file version. v1 held round-3 Kyber1024 keys (`pqc_kyber`); v2 holds
-/// FIPS-203 ML-KEM-1024 keys (`ml-kem`). The two are not interoperable.
+/// FIPS-203 ML-KEM-1024 keys (`ic-mlkem`). The two are not interoperable.
 const KEY_VERSION: u8 = 2;
 /// Algorithm id in the key-file header. 0 was Kyber1024; 1 is ML-KEM-1024.
 const ALGORITHM_MLKEM1024: u8 = 1;
@@ -45,12 +47,72 @@ pub struct PqcKeyPair {
 }
 
 /// Generate a new ML-KEM-1024 keypair (using the system RNG).
+///
+/// The secret key is stored as the 64-byte FIPS 203 seed rather than the 3168-byte
+/// expanded decapsulation key. The public key is the 1568-byte encapsulation key.
+/// The expanded form is rebuilt from the seed when needed (see [`expand`]).
 pub fn generate_keypair() -> AftResult<PqcKeyPair> {
-    let (dk, ek) = MlKem1024::generate_keypair();
+    let mut seed = [0u8; SEED_LEN];
+    primitives::random_bytes(&mut seed)?;
+    let (ek, _dk) = expand(&seed)?;
     Ok(PqcKeyPair {
-        public_key: ek.to_bytes().as_slice().to_vec(),
-        secret_key: dk.to_bytes().as_slice().to_vec(),
+        public_key: ek.to_vec(),
+        secret_key: seed.to_vec(),
     })
+}
+
+/// Derive the encapsulation and decapsulation keys from a FIPS 203 seed `d || z`.
+fn expand(seed: &[u8]) -> AftResult<(Box<[u8; ENCAPS_KEY_LEN]>, Box<[u8; DECAPS_KEY_LEN]>)> {
+    if seed.len() != SEED_LEN {
+        return Err(AftError::CryptoError(format!(
+            "ML-KEM seed must be {} bytes, got {}",
+            SEED_LEN,
+            seed.len()
+        )));
+    }
+    let d: &[u8; 32] = seed[..32].try_into().expect("length checked above");
+    let z: &[u8; 32] = seed[32..].try_into().expect("length checked above");
+    let mut ek = Box::new([0u8; ENCAPS_KEY_LEN]);
+    let mut dk = Box::new([0u8; DECAPS_KEY_LEN]);
+    MlKem1024::keygen_deterministic(d, z, &mut ek, &mut dk);
+    Ok((ek, dk))
+}
+
+/// Parse a public key (encapsulation key) from its raw bytes.
+fn encapsulation_key(bytes: &[u8]) -> AftResult<Box<[u8; ENCAPS_KEY_LEN]>> {
+    let ek: Box<[u8; ENCAPS_KEY_LEN]> = bytes.to_vec().into_boxed_slice().try_into().map_err(
+        |_| {
+            AftError::CryptoError(format!(
+                "ML-KEM public key must be {} bytes, got {}",
+                ENCAPS_KEY_LEN,
+                bytes.len()
+            ))
+        },
+    )?;
+    MlKem1024::validate_encapsulation_key(&ek)
+        .map_err(|e| AftError::CryptoError(format!("ML-KEM public key: {}", e)))?;
+    Ok(ek)
+}
+
+/// Decapsulate `kem_ct` with the seed-form secret key, returning the shared secret.
+fn decapsulate(kem_ct: &[u8], seed: &[u8]) -> AftResult<[u8; SHARED_SECRET_LEN]> {
+    let ct: &[u8; CIPHERTEXT_LEN] = kem_ct.try_into().map_err(|_| {
+        AftError::CryptoError("ML-KEM ciphertext has the wrong length".into())
+    })?;
+    let (_ek, dk) = expand(seed)?;
+    let mut shared = [0u8; SHARED_SECRET_LEN];
+    MlKem1024::decapsulate(&dk, ct, &mut shared)
+        .map_err(|e| AftError::CryptoError(format!("ML-KEM decapsulation: {}", e)))?;
+    Ok(shared)
+}
+
+/// Encapsulate to `ek`, returning `(kem_ciphertext, shared_secret)`.
+fn encapsulate(ek: &[u8; ENCAPS_KEY_LEN]) -> AftResult<(Vec<u8>, [u8; SHARED_SECRET_LEN])> {
+    let mut ct = [0u8; CIPHERTEXT_LEN];
+    let mut shared = [0u8; SHARED_SECRET_LEN];
+    MlKem1024::encapsulate(&mut primitives::os_rng(), ek, &mut ct, &mut shared)
+        .map_err(|e| AftError::CryptoError(format!("ML-KEM encapsulation: {}", e)))?;
+    Ok((ct.to_vec(), shared))
 }
 
 /// Save a public key to a file (atomic write).
@@ -134,82 +196,51 @@ pub fn load_secret_key(path: &Path) -> AftResult<Vec<u8>> {
 /// Returns `(kem_ciphertext, aes_nonce || aes_ciphertext_with_tag)`.
 pub fn encrypt(plaintext: &[u8], pub_key_path: &Path) -> AftResult<(Vec<u8>, Vec<u8>)> {
     let pub_key = load_public_key(pub_key_path)?;
+    let ek = encapsulation_key(&pub_key)?;
 
     // KEM encapsulate → 32-byte shared secret
-    let ek = EncapsulationKey::new_from_slice(&pub_key)
-        .map_err(|e| AftError::CryptoError(format!("ML-KEM public key: {:?}", e)))?;
-    let (kem_ct, shared_secret) = ek.encapsulate();
+    let (kem_ct, shared_secret) = encapsulate(&ek)?;
 
-    // AES-256-GCM with the shared secret as key
-    let cipher = Aes256Gcm::new_from_slice(shared_secret.as_slice())
-        .map_err(|e| AftError::CryptoError(format!("AES key error: {}", e)))?;
+    let mut nonce = [0u8; GCM_NONCE_LEN];
+    primitives::random_bytes(&mut nonce)?;
+    let ciphertext = primitives::gcm_seal(&shared_secret, &nonce, &[], plaintext)?;
 
-    let mut nonce_bytes = [0u8; 12];
-    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| AftError::CryptoError(format!("AES-GCM encryption failed: {}", e)))?;
-
-    // Combine: nonce || ciphertext (tag is appended by aes-gcm)
-    let mut result = Vec::with_capacity(12 + ciphertext.len());
-    result.extend_from_slice(&nonce_bytes);
+    // Combine: nonce || ciphertext (tag is appended by gcm_seal)
+    let mut result = Vec::with_capacity(GCM_NONCE_LEN + ciphertext.len());
+    result.extend_from_slice(&nonce);
     result.extend_from_slice(&ciphertext);
 
-    Ok((kem_ct.as_slice().to_vec(), result))
+    Ok((kem_ct, result))
 }
 
 /// Decrypt data using ML-KEM-1024 KEM + AES-256-GCM.
 pub fn decrypt(kem_ct: &[u8], encrypted: &[u8], sec_key_path: &Path) -> AftResult<Vec<u8>> {
     let sec_key = load_secret_key(sec_key_path)?;
+    let shared_secret = decapsulate(kem_ct, &sec_key)?;
 
-    // KEM decapsulate → recover shared secret
-    let dk = DecapsulationKey::new_from_slice(&sec_key)
-        .map_err(|e| AftError::CryptoError(format!("ML-KEM secret key: {:?}", e)))?;
-    let ct = Ciphertext::try_from(kem_ct)
-        .map_err(|_| AftError::CryptoError("ML-KEM ciphertext has the wrong length".into()))?;
-    let shared_secret = dk.decapsulate(&ct);
-
-    // AES-256-GCM decrypt
-    let cipher = Aes256Gcm::new_from_slice(shared_secret.as_slice())
-        .map_err(|e| AftError::CryptoError(format!("AES key error: {}", e)))?;
-
-    if encrypted.len() < 12 {
+    if encrypted.len() < GCM_NONCE_LEN {
         return Err(AftError::CryptoError(
             "Encrypted data too short for nonce".into(),
         ));
     }
-    let nonce = Nonce::from_slice(&encrypted[..12]);
-    let ciphertext = &encrypted[12..];
-
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| AftError::CryptoError(format!("AES-GCM decryption failed: {}", e)))?;
-
-    Ok(plaintext)
+    let (nonce, ciphertext) = encrypted.split_at(GCM_NONCE_LEN);
+    primitives::gcm_open(&shared_secret, nonce, &[], ciphertext)
 }
 
 /// Perform KEM encapsulation only (for hybrid mode).
 /// Returns `(kem_ciphertext, shared_secret)`.
 pub fn encapsulate_key(pub_key_path: &Path) -> AftResult<(Vec<u8>, Vec<u8>)> {
     let pub_key = load_public_key(pub_key_path)?;
-    let ek = EncapsulationKey::new_from_slice(&pub_key)
-        .map_err(|e| AftError::CryptoError(format!("ML-KEM public key: {:?}", e)))?;
-    let (ct, ss) = ek.encapsulate();
-    Ok((ct.as_slice().to_vec(), ss.as_slice().to_vec()))
+    let ek = encapsulation_key(&pub_key)?;
+    let (ct, ss) = encapsulate(&ek)?;
+    Ok((ct, ss.to_vec()))
 }
 
 /// Perform KEM decapsulation only (for hybrid mode).
 /// Returns the shared secret.
 pub fn decapsulate_key(kem_ct: &[u8], sec_key_path: &Path) -> AftResult<Vec<u8>> {
     let sec_key = load_secret_key(sec_key_path)?;
-    let dk = DecapsulationKey::new_from_slice(&sec_key)
-        .map_err(|e| AftError::CryptoError(format!("ML-KEM secret key: {:?}", e)))?;
-    let ct = Ciphertext::try_from(kem_ct)
-        .map_err(|_| AftError::CryptoError("ML-KEM ciphertext has the wrong length".into()))?;
-    let ss = dk.decapsulate(&ct);
-    Ok(ss.as_slice().to_vec())
+    Ok(decapsulate(kem_ct, &sec_key)?.to_vec())
 }
 
 #[cfg(test)]

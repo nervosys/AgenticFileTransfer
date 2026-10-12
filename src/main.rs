@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
-use sha2::Digest;
+use ic_core::traits::Digest;
+use md5::Digest as _;
 
 use cli::{
     ChecksumAlgorithm, Cli, CliCompareMode, Command, OutputFormat, PluginAction, TelemetryAction,
@@ -62,6 +63,15 @@ fn enable_utf8_console() {
 async fn main() {
     #[cfg(windows)]
     enable_utf8_console();
+
+    // Under --features fips, IronCrypto's power-on self-tests must pass before
+    // any cryptographic operation. A failed self-test means the module is not
+    // trustworthy, so AFT stops rather than run with it.
+    #[cfg(feature = "fips")]
+    if let Err(e) = ic_fips::initialize() {
+        eprintln!("FIPS self-test failed; refusing to run: {}", e);
+        std::process::exit(1);
+    }
 
     let mut cli = Cli::parse();
     let _config = match config::load_config() {
@@ -1186,7 +1196,7 @@ async fn cmd_checksum(
         let mut buf = vec![0u8; 65_536];
         match algorithm {
             ChecksumAlgorithm::Sha256 => {
-                let mut hasher = sha2::Sha256::new();
+                let mut hasher = ic_hash::Sha256::new();
                 loop {
                     let n = file.read(&mut buf).await?;
                     if n == 0 {
@@ -1197,7 +1207,7 @@ async fn cmd_checksum(
                 hex::encode(hasher.finalize())
             }
             ChecksumAlgorithm::Sha512 => {
-                let mut hasher = sha2::Sha512::new();
+                let mut hasher = ic_hash::Sha512::new();
                 loop {
                     let n = file.read(&mut buf).await?;
                     if n == 0 {

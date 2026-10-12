@@ -180,8 +180,7 @@ impl PluginRegistry {
         let plugin_bytes = std::fs::read(path)
             .map_err(|e| AftError::Other(format!("Cannot read plugin {:?}: {}", path, e)))?;
 
-        use sha2::Digest;
-        let actual_hash = hex::encode(sha2::Sha256::digest(&plugin_bytes));
+        let actual_hash = hex::encode(crate::crypto::primitives::sha256(&plugin_bytes));
 
         if actual_hash != expected_hash {
             return Err(AftError::PermissionDenied(format!(

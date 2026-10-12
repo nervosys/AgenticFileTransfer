@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use colored::*;
-use sha2::Digest;
+use ic_core::traits::Digest;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -140,7 +140,7 @@ impl SessionStore {
     /// Generate a cryptographically random session ID (hex-encoded 16 bytes).
     fn generate_id() -> String {
         let mut buf = [0u8; 16];
-        rand::Rng::fill(&mut rand::thread_rng(), &mut buf);
+        crate::crypto::primitives::random_bytes(&mut buf).expect("OS entropy unavailable");
         hex::encode(buf)
     }
 
@@ -588,7 +588,7 @@ where
         if state.auth_challenge && hello_data.capabilities & CAP_AUTH_CHALLENGE != 0 {
             // Challenge/response auth: send nonce, verify HMAC-SHA256
             let mut nonce = [0u8; 32];
-            rand::Rng::fill(&mut rand::thread_rng(), &mut nonce);
+            crate::crypto::primitives::random_bytes(&mut nonce)?;
 
             let challenge_payload = build_auth_challenge(&nonce);
             write_frame(writer, &Frame::new(FRAME_AUTH_CHALLENGE, challenge_payload)).await?;
@@ -611,11 +611,7 @@ where
 
             let resp_data = parse_auth_response(&resp_frame.payload)?;
 
-            use hmac::{Hmac, Mac};
-            type HmacSha256 = Hmac<sha2::Sha256>;
-            let mut mac = HmacSha256::new_from_slice(expected.as_bytes()).expect("HMAC key length");
-            mac.update(&nonce);
-            if mac.verify_slice(&resp_data.hmac).is_err() {
+            if !crate::crypto::primitives::hmac_sha256_verify(expected.as_bytes(), &nonce, &resp_data.hmac) {
                 let mut limiter = state.rate_limiter.lock().await;
                 limiter.record_failure(addr.ip());
                 audit::log_auth_failure(&addr.ip().to_string(), "HMAC verification failed");
@@ -1088,7 +1084,7 @@ where
 
     // The client derives the symbol key from the same session id and shared
     // token, so we reconstruct it here without it ever crossing the wire.
-    let key = super::fec::derive_symbol_key(auth_token, offer.session_id);
+    let key = super::fec::derive_symbol_key(auth_token, offer.session_id)?;
     if offer.authenticated && key.is_none() {
         // The client wants authenticated symbols but we cannot derive the key
         // here; refuse rather than silently accepting unauthenticated data.
@@ -1249,7 +1245,7 @@ where
     if end.checksum_algo == CHECKSUM_SHA256 && !end.checksum.is_empty() {
         use tokio::io::AsyncReadExt;
         let mut f = tokio::fs::File::open(temp_path).await?;
-        let mut hasher = sha2::Sha256::new();
+        let mut hasher = ic_hash::Sha256::new();
         let mut buf = vec![0u8; 1 << 20];
         loop {
             let n = f.read(&mut buf).await?;
@@ -1316,7 +1312,7 @@ where
     let _ = session_id;
     let numeric_session = super::fec::random_session_id();
 
-    let key = super::fec::derive_symbol_key(state.auth_token.as_deref(), numeric_session);
+    let key = super::fec::derive_symbol_key(state.auth_token.as_deref(), numeric_session)?;
     let authenticated = key.is_some();
 
     // A QUIC datagram is smaller than the UDP MTU; size symbols to the QUIC
@@ -1395,7 +1391,7 @@ where
     let digest = {
         use tokio::io::AsyncReadExt;
         let mut f = tokio::fs::File::open(path).await?;
-        let mut hasher = sha2::Sha256::new();
+        let mut hasher = ic_hash::Sha256::new();
         let mut buf = vec![0u8; 1 << 20];
         loop {
             let n = f.read(&mut buf).await?;
@@ -1583,7 +1579,7 @@ where
     let bytes_to_send = end - start + 1;
     let frame_buf_size = state.max_frame_size as usize;
     let mut buf = vec![0u8; frame_buf_size];
-    let mut hasher = sha2::Sha256::new();
+    let mut hasher = ic_hash::Sha256::new();
     let mut total_sent = 0u64;
 
     while total_sent < bytes_to_send {
@@ -1750,7 +1746,7 @@ where
     writer.flush().await?;
 
     let mut file = tokio::fs::File::create(&temp_path).await?;
-    let mut hasher = sha2::Sha256::new();
+    let mut hasher = ic_hash::Sha256::new();
     let mut total_received = 0u64;
 
     // Receive DATA frames — unless the client offers the fountain data plane,
@@ -2036,7 +2032,7 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> AftResult<tokio_rustls:
     use std::io::BufReader as StdBufReader;
 
     // Install the default crypto provider if not already installed
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = ic_rustls::provider().install_default();
 
     let cert_file = std::fs::File::open(cert_path)
         .map_err(|e| AftError::Other(format!("Cannot open TLS cert {}: {}", cert_path, e)))?;
@@ -2061,8 +2057,9 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> AftResult<tokio_rustls:
 
     #[cfg(feature = "fips")]
     let provider = {
-        // Use AWS-LC (FIPS 140-3 validated) as the crypto backend
-        let crypto_provider = rustls::crypto::aws_lc_rs::default_provider();
+        // Use IronCrypto as the crypto backend, limited to FIPS-approved suites.
+        // IronCrypto is not CMVP-validated; see docs/SECURITY.md section 3.
+        let crypto_provider = ic_rustls::provider();
         let cipher_suites = crypto_provider
             .cipher_suites
             .iter()
@@ -2082,17 +2079,17 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> AftResult<tokio_rustls:
     let provider = {
         let cipher_suites = vec![
             // TLS 1.3 — AES-256-GCM, AES-128-GCM (FIPS-approved)
-            rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
-            rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
+            ic_rustls::suites::TLS13_AES_256_GCM_SHA384,
+            ic_rustls::suites::TLS13_AES_128_GCM_SHA256,
             // TLS 1.2 — ECDHE + AES-GCM (FIPS-approved key exchange + cipher)
-            rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-            rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-            rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-            rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            ic_rustls::suites::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            ic_rustls::suites::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            ic_rustls::suites::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            ic_rustls::suites::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
         ];
         rustls::crypto::CryptoProvider {
             cipher_suites,
-            ..rustls::crypto::ring::default_provider()
+            ..ic_rustls::provider()
         }
     };
 

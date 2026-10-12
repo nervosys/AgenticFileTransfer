@@ -24,7 +24,7 @@ use std::io::Write;
 use std::path::Path;
 
 use rand::rngs::StdRng;
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{Rng, SeedableRng};
 
 use crate::error::{AftError, AftResult};
 
@@ -428,7 +428,7 @@ impl NeuralCipher {
 
         // Random IV
         let mut iv = [0u8; BLOCK_SIZE];
-        rand::rngs::OsRng.fill_bytes(&mut iv);
+        crate::crypto::primitives::random_bytes(&mut iv).expect("OS entropy unavailable");
 
         let mut result = Vec::with_capacity(BLOCK_SIZE + padded.len());
         result.extend_from_slice(&iv);
@@ -655,8 +655,7 @@ fn verify_model_signature(model_path: &Path) -> AftResult<()> {
     let model_bytes = std::fs::read(model_path)
         .map_err(|e| AftError::Other(format!("Cannot read model file {:?}: {}", model_path, e)))?;
 
-    use sha2::Digest;
-    let actual_hash = hex::encode(sha2::Sha256::digest(&model_bytes));
+    let actual_hash = hex::encode(crate::crypto::primitives::sha256(&model_bytes));
 
     if actual_hash != expected_hash {
         return Err(AftError::PermissionDenied(format!(

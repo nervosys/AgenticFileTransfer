@@ -58,7 +58,7 @@
 //! At 46 bytes encrypted (22 unauthenticated) an envelope leaves 1350 bytes of
 //! symbol in a 1400-byte datagram — 96.4% efficiency.
 
-use rand::RngCore;
+use crate::crypto::primitives;
 
 use super::symcrypto;
 use crate::error::{AftError, AftResult};
@@ -168,7 +168,7 @@ impl Envelope {
                 self.write_prefix(flags, &mut out);
 
                 let mut nonce_bytes = [0u8; NONCE_LEN];
-                rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+                primitives::random_bytes(&mut nonce_bytes)?;
                 out.extend_from_slice(&nonce_bytes);
 
                 // AAD = the 18-byte prefix, so the header is authenticated even

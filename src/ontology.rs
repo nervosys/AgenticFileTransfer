@@ -93,11 +93,6 @@ impl OperationEffects {
             loads_code,
         }
     }
-
-    /// Reads something and changes nothing.
-    const fn read_only(network: bool) -> Self {
-        Self::new(false, false, network, false)
-    }
 }
 
 #[derive(Serialize)]

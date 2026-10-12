@@ -42,7 +42,6 @@ anyhow = "1"
 colored = "2"
 indicatif = "0.17"
 futures = "0.3"
-sha2 = "0.10"
 md5 = { package = "md-5", version = "0.10" }
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
@@ -76,9 +75,6 @@ whoami = "1"
 toml = "0.8"
 dirs = "6"
 
-# HMAC for AFTP challenge/response auth
-hmac = "0.12"
-
 # WebSocket transport
 tokio-tungstenite = "0.24"
 
@@ -91,25 +87,28 @@ bytes = "1"
 # Plugin system
 libloading = "0.8"
 
-# Random nonce generation
+# Random number generator for the neural cipher's seeded (deterministic) PRNG.
+# Not used for any cryptographic key, nonce, or session value: those come from
+# crate::crypto::primitives, which is backed by IronCrypto.
 rand = "0.8"
 
 # URL encoding for cloud storage APIs
 urlencoding = "2"
 
-# Post-quantum key encapsulation: ML-KEM-1024 (NIST FIPS 203 final).
-# Replaced the unmaintained `pqc_kyber` (round-3 Kyber, KyberSlash timing
-# side-channel with no upstream fix) with RustCrypto's maintained `ml-kem`.
-# This is a deliberate algorithm change: ML-KEM-1024 keys/ciphertexts are NOT
-# interoperable with the old Kyber1024 ones, so pqc.rs bumps its key-file
-# version and rejects legacy files (regenerate with `aft keygen`).
-# `getrandom` enables the no-arg generate_keypair()/encapsulate() that use the
-# system RNG — avoids threading our rand 0.8 OsRng across ml-kem's newer
-# rand_core version boundary.
-ml-kem = { version = "0.3", features = ["getrandom"] }
-
-# AES-256-GCM authenticated encryption
-aes-gcm = "0.10"
+# IronCrypto (the IronSecurity stack) is the sole source of AFT's cryptographic
+# primitives. All use goes through src/crypto/primitives.rs, the one boundary:
+#   ic-core    OS entropy, traits, and error types
+#   ic-hash    SHA-256 and SHA-512
+#   ic-mac     HMAC-SHA256 (AFTP challenge/response, symbol-key KDF)
+#   ic-cipher  AES-256-GCM (FEC symbols, PQC payloads)
+#   ic-mlkem   ML-KEM-1024 (NIST FIPS 203) key encapsulation
+#   ic-rustls  rustls CryptoProvider, used for every TLS, QUIC, and FTPS session
+ic-core = "0.2.24"
+ic-hash = "0.2.24"
+ic-mac = "0.2.24"
+ic-cipher = "0.2.24"
+ic-mlkem = "0.2.24"
+ic-rustls = "0.2.24"
 
 # OTLP (OpenTelemetry) protobuf message types for telemetry export
 # (src/telemetry.rs). `gen-tonic-messages` provides the prost-generated structs
@@ -132,14 +131,12 @@ rcgen = "0.13"
 # RaptorQ fountain coding (RFC 6330) for the AFTP FEC data plane
 raptorq = "2"
 
-# Optional: FIPS 140-3 validated crypto backend. Enable with
-# `cargo build --features fips`. Selects aws-lc-rs for the rustls TLS provider
-# (server.rs) AND for the FEC data-plane AEAD/KDF (src/aftp/fec/symcrypto.rs);
-# without it those use the RustCrypto aes-gcm/hmac crates.
-aws-lc-rs = { version = "1", optional = true }
+# Optional: IronCrypto's FIPS mode. Enable with `cargo build --features fips`.
+# Runs the FIPS power-on self-tests at startup and refuses to run if they fail.
+ic-fips = { version = "0.2.24", optional = true }
 
-# NOTE: the three dependencies above are used unconditionally by src/aftp/
-# (CRC32 framing, QUIC dev certs, the FIPS backend). They must stay in the
+# NOTE: the dependencies above are used unconditionally by src/aftp/ (CRC32
+# framing, QUIC dev certs, the crypto boundary). They must stay in the
 # top-level [dependencies] table. They previously sat below the
 # cfg(windows) header, which TOML scoped into that table and silently made
 # the whole crate Windows-only — it did not compile on Linux or macOS.
@@ -160,7 +157,7 @@ windows-sys = { version = "0.59", features = [
 
 [features]
 default = []
-fips = ["aws-lc-rs"]
+fips = ["dep:ic-fips"]
 
 [profile.release]
 opt-level = 3
@@ -171,6 +168,9 @@ panic = "abort"
 
 [dev-dependencies]
 tempfile = "3"
+# Independent SHA-2 implementation, used only as a reference in the integration
+# tests: they check IronCrypto's digests against it. Not part of the shipped binary.
+sha2 = "0.10"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

@@ -225,18 +225,32 @@ pub async fn connect_plane(
 /// the datagram plane over the same authenticated QUIC connection as the
 /// control plane rather than a fresh self-signed one.
 pub fn dev_server_endpoint(addr: std::net::SocketAddr) -> AftResult<quinn::Endpoint> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
         .map_err(|e| AftError::Other(format!("QUIC cert gen: {}", e)))?;
     let cert_der = cert.cert.der().to_vec();
     let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
 
-    let mut server_config = quinn::ServerConfig::with_single_cert(
+    // Pinned to ring, not the process default. The rest of AFT installs
+    // ic-rustls as the default provider. A QUIC handshake fails when its two
+    // ends use different providers (ring server with ic client, or the
+    // reverse), and succeeds when both use the same one. Staying on ring keeps
+    // this data plane compatible with 2.0.0 peers. Switching it to ic-rustls
+    // would break that until every peer has been upgraded.
+    let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| AftError::Other(format!("QUIC server config: {}", e)))?
+    .with_no_client_auth()
+    .with_single_cert(
         vec![rustls::pki_types::CertificateDer::from(cert_der)],
         rustls::pki_types::PrivateKeyDer::Pkcs8(key_der),
     )
     .map_err(|e| AftError::Other(format!("QUIC server config: {}", e)))?;
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(tls)
+            .map_err(|e| AftError::Other(format!("QUIC server config: {}", e)))?,
+    ));
     server_config.transport = Arc::new(datagram_transport());
 
     quinn::Endpoint::server(server_config, addr)
@@ -246,10 +260,12 @@ pub fn dev_server_endpoint(addr: std::net::SocketAddr) -> AftResult<quinn::Endpo
 /// Build a client `Endpoint` that trusts the dev cert (insecure verifier) with
 /// unreliable datagrams enabled. Development/lab helper.
 pub fn dev_client_endpoint() -> AftResult<quinn::Endpoint> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let crypto = rustls::ClientConfig::builder()
-        .dangerous()
+    let crypto = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| AftError::Other(format!("QUIC client config: {}", e)))?
+    .dangerous()
         .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
         .with_no_client_auth();
     let mut client_config = quinn::ClientConfig::new(Arc::new(

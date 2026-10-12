@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use colored::*;
-use sha2::Digest;
+use ic_core::traits::Digest;
 use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 
@@ -254,11 +254,7 @@ impl AftpClient {
                 .ok_or_else(|| AftError::AuthFailed("Auth token required for challenge".into()))?;
 
             // Compute HMAC-SHA256(token, nonce)
-            use hmac::{Hmac, Mac};
-            type HmacSha256 = Hmac<sha2::Sha256>;
-            let mut mac = HmacSha256::new_from_slice(token.as_bytes()).expect("HMAC key length");
-            mac.update(&challenge.nonce);
-            let result = mac.finalize().into_bytes();
+            let result = crate::crypto::primitives::hmac_sha256(token.as_bytes(), &[&challenge.nonce])?;
 
             let resp_payload = build_auth_response(&result);
             write_frame(&mut writer, &Frame::new(FRAME_AUTH_RESPONSE, resp_payload)).await?;
@@ -439,7 +435,7 @@ impl AftpClient {
         // Stream remaining data from byte_offset
         let frame_buf_size = max_frame as usize;
         let mut buf = vec![0u8; frame_buf_size];
-        let mut hasher = sha2::Sha256::new();
+        let mut hasher = ic_hash::Sha256::new();
         let mut total_sent = byte_offset;
 
         // Hash the already-sent portion so the final checksum is correct
@@ -614,7 +610,7 @@ impl AftpClient {
         }
 
         let mut file = tokio::fs::File::create(dest).await?;
-        let mut hasher = sha2::Sha256::new();
+        let mut hasher = ic_hash::Sha256::new();
         let mut received = 0u64;
 
         // Receive DATA frames
@@ -820,7 +816,7 @@ impl AftpClient {
         // replayed into a later same-size one.
         let session_id: u64 = super::fec::random_session_id();
 
-        let key = super::fec::derive_symbol_key(self.auth_token.as_deref(), session_id);
+        let key = super::fec::derive_symbol_key(self.auth_token.as_deref(), session_id)?;
         let authenticated = key.is_some();
         // A QUIC datagram is smaller than the UDP MTU, and the offer must fix the
         // symbol size before the QUIC path exists — so size to the conservative
@@ -969,7 +965,7 @@ impl AftpClient {
         // cache warm); for a tree it re-reads the manifest prefix and files.
         // Either way peak memory stays at one block.
         let digest = {
-            let mut hasher = sha2::Sha256::new();
+            let mut hasher = ic_hash::Sha256::new();
             let mut pos = 0u64;
             let chunk = block_size as u64;
             while pos < total_len {
@@ -1061,7 +1057,7 @@ impl AftpClient {
             )));
         }
 
-        let key = super::fec::derive_symbol_key(self.auth_token.as_deref(), offer.session_id);
+        let key = super::fec::derive_symbol_key(self.auth_token.as_deref(), offer.session_id)?;
         if offer.authenticated && key.is_none() {
             return Err(AftError::Other(
                 "Server requires authenticated FEC symbols but this connection has no token".into(),
@@ -1219,7 +1215,7 @@ impl AftpClient {
             // Stream the temp file through SHA-256 rather than loading it, so
             // verification is also bounded memory.
             let mut f = tokio::fs::File::open(&tmp).await?;
-            let mut hasher = sha2::Sha256::new();
+            let mut hasher = ic_hash::Sha256::new();
             let mut buf = vec![0u8; 1 << 20];
             loop {
                 let n = tokio::io::AsyncReadExt::read(&mut f, &mut buf).await?;
@@ -1347,7 +1343,7 @@ impl AftpClient {
         let mut file = tokio::fs::File::open(source).await?;
         let frame_buf_size = max_frame as usize;
         let mut buf = vec![0u8; frame_buf_size];
-        let mut hasher = sha2::Sha256::new();
+        let mut hasher = ic_hash::Sha256::new();
         let mut total_sent = 0u64;
 
         loop {
@@ -1453,17 +1449,17 @@ fn make_client_tls_config(insecure: bool) -> AftResult<Arc<rustls::ClientConfig>
     // Restrict to TLS 1.2+ and FIPS-compatible cipher suites
     let tls_versions = &[&rustls::version::TLS13, &rustls::version::TLS12];
     let cipher_suites = vec![
-        rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
-        rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
-        rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-        rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-        rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-        rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        ic_rustls::suites::TLS13_AES_256_GCM_SHA384,
+        ic_rustls::suites::TLS13_AES_128_GCM_SHA256,
+        ic_rustls::suites::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        ic_rustls::suites::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        ic_rustls::suites::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        ic_rustls::suites::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
     ];
 
     let provider = rustls::crypto::CryptoProvider {
         cipher_suites,
-        ..rustls::crypto::ring::default_provider()
+        ..ic_rustls::provider()
     };
     let provider = Arc::new(provider);
 
@@ -1526,7 +1522,7 @@ impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
+        ic_rustls::provider()
             .signature_verification_algorithms
             .supported_schemes()
     }

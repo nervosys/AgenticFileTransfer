@@ -1,38 +1,33 @@
 // Copyright (c) 2024-2026 Nervosys LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Symbol-plane AEAD and KDF, with an optional FIPS-validated backend.
+//! Symbol-plane AEAD and KDF, backed by IronCrypto.
 //!
 //! The FEC data plane needs exactly two primitives: **AES-256-GCM** (seal/open a
 //! symbol — see [`super::envelope`]) and **HMAC-SHA256** (derive the per-session
-//! symbol key — see [`super::derive_symbol_key`]). By default both come from the
-//! RustCrypto crates (`aes-gcm`, `hmac`/`sha2`) that the rest of AFT's non-TLS
-//! pipeline uses.
+//! symbol key — see [`super::derive_symbol_key`]). Both come from IronCrypto via
+//! [`crate::crypto::primitives`], the single boundary for AFT's cryptography.
 //!
-//! With `--features fips` they are instead routed through `aws-lc-rs`, the same
-//! FIPS 140-3 validated module rustls uses for TLS (see `server.rs`). A FIPS
-//! build therefore keeps *all* of AFT's bulk-data crypto inside the validated
-//! boundary, not only the control plane.
-//!
-//! The wire format is identical either way — AES-256-GCM, 96-bit nonce, 128-bit
-//! tag, same AAD — so a `--features fips` build and a default build interoperate
-//! symbol-for-symbol on the wire. This module is the *only* place the FEC data
-//! plane touches an AEAD or a MAC; both callers go through it.
+//! The wire format is AES-256-GCM with a 96-bit nonce, a 128-bit tag, and the
+//! caller's AAD. This module is the *only* place the FEC data plane touches an
+//! AEAD or a MAC; both callers go through it.
 
+use crate::crypto::primitives::{self, GCM_NONCE_LEN, GCM_TAG_LEN};
 use crate::error::{AftError, AftResult};
 
 /// AES-256 key length.
 pub const KEY_LEN: usize = 32;
 /// AES-256-GCM nonce length (96-bit).
-pub const NONCE_LEN: usize = 12;
+pub const NONCE_LEN: usize = GCM_NONCE_LEN;
 /// AES-256-GCM authentication tag length (128-bit).
-pub const TAG_LEN: usize = 16;
+pub const TAG_LEN: usize = GCM_TAG_LEN;
 
 /// HMAC-SHA256 over the concatenation of `parts`, keyed by `key`.
 ///
-/// The KDF for the per-session symbol key. Accepts a key of any length (HMAC
-/// zero-pads or hashes internally), so it never fails.
-pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-    backend::hmac_sha256(key, parts)
+/// The KDF for the per-session symbol key. Accepts a key of any length. It
+/// returns an error only if the IronCrypto backend itself refuses to run, and
+/// callers must propagate that rather than continue without a key.
+pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> AftResult<[u8; 32]> {
+    primitives::hmac_sha256(key, parts)
 }
 
 /// AES-256-GCM seal. Returns `ciphertext || tag` (16-byte tag trailing), which
@@ -42,7 +37,7 @@ pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 /// length is an error rather than a panic.
 pub fn seal(key: &[u8], nonce: &[u8], aad: &[u8], plaintext: &[u8]) -> AftResult<Vec<u8>> {
     check_lengths(key, nonce)?;
-    backend::seal(key, nonce, aad, plaintext)
+    primitives::gcm_seal(key, nonce, aad, plaintext)
 }
 
 /// AES-256-GCM open. `sealed` is `ciphertext || tag`. Returns the recovered
@@ -54,7 +49,9 @@ pub fn open(key: &[u8], nonce: &[u8], aad: &[u8], sealed: &[u8]) -> AftResult<Ve
             "FEC sealed symbol shorter than its tag".to_string(),
         ));
     }
-    backend::open(key, nonce, aad, sealed)
+    primitives::gcm_open(key, nonce, aad, sealed).map_err(|_| {
+        AftError::Other("FEC symbol authentication failed".to_string())
+    })
 }
 
 fn check_lengths(key: &[u8], nonce: &[u8]) -> AftResult<()> {
@@ -73,105 +70,6 @@ fn check_lengths(key: &[u8], nonce: &[u8]) -> AftResult<()> {
         )));
     }
     Ok(())
-}
-
-// ---------------------------------------------------------------- default ----
-// RustCrypto backend: the same `aes-gcm` and `hmac`/`sha2` primitives the PQC
-// pipeline uses. Selected whenever the `fips` feature is off.
-#[cfg(not(feature = "fips"))]
-mod backend {
-    use super::*;
-    use aes_gcm::aead::{Aead, KeyInit, Payload};
-    use aes_gcm::{Aes256Gcm, Nonce};
-    use hmac::{Hmac, Mac};
-
-    pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-        // `new_from_slice` only errors on an invalid key length, and HMAC
-        // accepts any length, so this cannot fail.
-        // Disambiguate: `KeyInit` (from aes-gcm, in scope for `seal`/`open`)
-        // also offers `new_from_slice`.
-        let mut mac =
-            <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
-        for p in parts {
-            mac.update(p);
-        }
-        mac.finalize().into_bytes().into()
-    }
-
-    pub fn seal(key: &[u8], nonce: &[u8], aad: &[u8], plaintext: &[u8]) -> AftResult<Vec<u8>> {
-        let cipher = Aes256Gcm::new_from_slice(key)
-            .map_err(|e| AftError::Other(format!("FEC cipher key: {}", e)))?;
-        cipher
-            .encrypt(
-                Nonce::from_slice(nonce),
-                Payload {
-                    msg: plaintext,
-                    aad,
-                },
-            )
-            .map_err(|_| AftError::Other("FEC symbol encryption failed".to_string()))
-    }
-
-    pub fn open(key: &[u8], nonce: &[u8], aad: &[u8], sealed: &[u8]) -> AftResult<Vec<u8>> {
-        let cipher = Aes256Gcm::new_from_slice(key)
-            .map_err(|e| AftError::Other(format!("FEC cipher key: {}", e)))?;
-        cipher
-            .decrypt(Nonce::from_slice(nonce), Payload { msg: sealed, aad })
-            .map_err(|_| AftError::Other("FEC symbol authentication failed".to_string()))
-    }
-}
-
-// ------------------------------------------------------------------- fips ----
-// aws-lc-rs backend: FIPS 140-3 validated AES-256-GCM and HMAC-SHA256. Selected
-// by `--features fips`. Produces the identical wire bytes as the default path.
-#[cfg(feature = "fips")]
-mod backend {
-    use super::*;
-    use aws_lc_rs::{aead, hmac};
-
-    pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-        let k = hmac::Key::new(hmac::HMAC_SHA256, key);
-        let mut ctx = hmac::Context::with_key(&k);
-        for p in parts {
-            ctx.update(p);
-        }
-        let tag = ctx.sign();
-        let mut out = [0u8; 32];
-        // HMAC-SHA256 is always 32 bytes.
-        out.copy_from_slice(tag.as_ref());
-        out
-    }
-
-    pub fn seal(key: &[u8], nonce: &[u8], aad: &[u8], plaintext: &[u8]) -> AftResult<Vec<u8>> {
-        let key = aead::LessSafeKey::new(
-            aead::UnboundKey::new(&aead::AES_256_GCM, key)
-                .map_err(|_| AftError::Other("FEC cipher key".to_string()))?,
-        );
-        let nonce = aead::Nonce::try_assume_unique_for_key(nonce)
-            .map_err(|_| AftError::Other("FEC nonce".to_string()))?;
-        // seal_in_place_append_tag encrypts in place and appends the 16-byte
-        // tag, leaving `in_out` == ciphertext || tag.
-        let mut in_out = plaintext.to_vec();
-        key.seal_in_place_append_tag(nonce, aead::Aad::from(aad), &mut in_out)
-            .map_err(|_| AftError::Other("FEC symbol encryption failed".to_string()))?;
-        Ok(in_out)
-    }
-
-    pub fn open(key: &[u8], nonce: &[u8], aad: &[u8], sealed: &[u8]) -> AftResult<Vec<u8>> {
-        let key = aead::LessSafeKey::new(
-            aead::UnboundKey::new(&aead::AES_256_GCM, key)
-                .map_err(|_| AftError::Other("FEC cipher key".to_string()))?,
-        );
-        let nonce = aead::Nonce::try_assume_unique_for_key(nonce)
-            .map_err(|_| AftError::Other("FEC nonce".to_string()))?;
-        // open_in_place verifies the trailing tag and returns the plaintext
-        // prefix of the (now-decrypted) buffer.
-        let mut in_out = sealed.to_vec();
-        let plain = key
-            .open_in_place(nonce, aead::Aad::from(aad), &mut in_out)
-            .map_err(|_| AftError::Other("FEC symbol authentication failed".to_string()))?;
-        Ok(plain.to_vec())
-    }
 }
 
 #[cfg(test)]
@@ -222,11 +120,11 @@ mod tests {
 
     #[test]
     fn hmac_is_deterministic_and_32_bytes() {
-        let a = hmac_sha256(b"token", &[b"aft-fec-symbol-key-v2", &7u64.to_be_bytes()]);
-        let b = hmac_sha256(b"token", &[b"aft-fec-symbol-key-v2", &7u64.to_be_bytes()]);
+        let a = hmac_sha256(b"token", &[b"aft-fec-symbol-key-v2", &7u64.to_be_bytes()]).unwrap();
+        let b = hmac_sha256(b"token", &[b"aft-fec-symbol-key-v2", &7u64.to_be_bytes()]).unwrap();
         assert_eq!(a, b);
         assert_eq!(a.len(), 32);
-        let c = hmac_sha256(b"token", &[b"aft-fec-symbol-key-v2", &8u64.to_be_bytes()]);
+        let c = hmac_sha256(b"token", &[b"aft-fec-symbol-key-v2", &8u64.to_be_bytes()]).unwrap();
         assert_ne!(a, c);
     }
 
@@ -236,10 +134,36 @@ mod tests {
     fn hmac_known_answer() {
         // HMAC-SHA256(key="key", msg="The quick brown fox jumps over the lazy dog")
         // = f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8
-        let got = hmac_sha256(b"key", &[b"The quick brown fox jumps over the lazy dog"]);
+        let got = hmac_sha256(b"key", &[b"The quick brown fox jumps over the lazy dog"]).unwrap();
         let expect =
             hex::decode("f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
                 .unwrap();
         assert_eq!(&got[..], &expect[..]);
+    }
+}
+
+/// Known-answer values captured from the RustCrypto/aws-lc-rs build this backend
+/// replaced. A mismatch means the wire format changed, which would break
+/// interop with peers still on the old build.
+#[cfg(test)]
+mod wire_compat {
+    use super::*;
+
+    #[test]
+    fn seal_matches_pre_ironcrypto_bytes() {
+        let sealed = seal(&[7u8; 32], &[9u8; 12], b"aad-kat", b"raptorq symbol bytes").unwrap();
+        assert_eq!(
+            hex::encode(sealed),
+            "55e4f4e0d182b041d31ba65a898683bdadc40680f83ebe9b98ecc40f909ada01328eb4b6"
+        );
+    }
+
+    #[test]
+    fn symbol_kdf_matches_pre_ironcrypto_bytes() {
+        let key = hmac_sha256(b"token", &[b"aft-fec-symbol-key-v2", &7u64.to_be_bytes()]).unwrap();
+        assert_eq!(
+            hex::encode(key),
+            "3692b866b9cf1fe1edb727ed02d01bc514a39e252b4859e46b734370f65006ad"
+        );
     }
 }
