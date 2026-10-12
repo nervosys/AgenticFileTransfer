@@ -41,7 +41,8 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use ic_core::traits::Digest;
+use ic_hash::Sha256;
 
 use crate::aftp::frame::{
     get_bytes, get_str, get_u32, get_u64, get_u8, put_bytes, put_str, put_u32, put_u64, put_u8,
@@ -172,13 +173,13 @@ const NODE_TAG: u8 = 0x01;
 /// match for the reconstructed file to be the intended one.
 fn leaf_hash(e: &Entry) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update([LEAF_TAG]);
-    h.update([e.kind.to_u8()]);
-    h.update((e.path.len() as u64).to_le_bytes());
-    h.update(e.path.as_bytes());
-    h.update(e.mode.to_le_bytes());
-    h.update(e.size.to_le_bytes());
-    h.update(e.sha256);
+    h.update(&[LEAF_TAG]);
+    h.update(&[e.kind.to_u8()]);
+    h.update(&(e.path.len() as u64).to_le_bytes());
+    h.update(&e.path.as_bytes());
+    h.update(&e.mode.to_le_bytes());
+    h.update(&e.size.to_le_bytes());
+    h.update(&e.sha256);
     h.finalize().into()
 }
 
@@ -186,7 +187,7 @@ fn leaf_hash(e: &Entry) -> [u8; 32] {
 /// equalling a leaf (second-preimage resistance across the two levels).
 fn node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update([NODE_TAG]);
+    h.update(&[NODE_TAG]);
     h.update(left);
     h.update(right);
     h.finalize().into()
@@ -199,7 +200,7 @@ fn node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 fn merkle_root(entries: &[Entry]) -> [u8; 32] {
     if entries.is_empty() {
         let mut h = Sha256::new();
-        h.update([NODE_TAG]);
+        h.update(&[NODE_TAG]);
         return h.finalize().into();
     }
     let mut level: Vec<[u8; 32]> = entries.iter().map(leaf_hash).collect();

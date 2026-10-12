@@ -444,7 +444,7 @@ impl QuicTransportListener {
     }
 
     fn make_server_config() -> AftResult<(quinn::ServerConfig, Vec<u8>)> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = ic_rustls::provider().install_default();
 
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
             .map_err(|e| AftError::Other(format!("QUIC cert gen: {}", e)))?;
@@ -507,7 +507,7 @@ impl QuicTransportConnector {
 #[async_trait::async_trait]
 impl TransportConnector for QuicTransportConnector {
     async fn connect(&self, addr: &str) -> AftResult<TransportStream> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = ic_rustls::provider().install_default();
 
         let mut client_config = if self.insecure {
             let crypto = rustls::ClientConfig::builder()
@@ -602,7 +602,7 @@ impl rustls::client::danger::ServerCertVerifier for InsecureQuicVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
+        ic_rustls::provider()
             .signature_verification_algorithms
             .supported_schemes()
     }

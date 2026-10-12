@@ -5,7 +5,7 @@
 //! Provides three encryption methods:
 //!
 //! - **PQC**: Post-quantum ML-KEM-1024 key encapsulation + AES-256-GCM
-//!   (NIST FIPS 203, via the RustCrypto `ml-kem` crate). Recommended for DoD
+//!   (NIST FIPS 203, via IronCrypto's `ic-mlkem`). Recommended for DoD
 //!   environments.
 //! - **Neural**: Trained encoder-decoder neural network cipher.
 //!   Experimental — the model weights serve as the symmetric key.
@@ -16,15 +16,16 @@
 //!
 //! ## Hardware acceleration
 //!
-//! - **AES-256-GCM**: via `aes-gcm` — auto-detects AES-NI (x86_64) and
-//!   ARM AES extensions.
-//! - **SHA-256**: via `sha2` — auto-detects SHA-NI (x86_64) and SHA2 (aarch64).
+//! Every primitive comes from IronCrypto (the IronSecurity stack), through
+//! [`primitives`]: AES-256-GCM, SHA-256, HMAC-SHA256, ML-KEM-1024, and the OS
+//! entropy source.
 //! - **XOR bulk masking**: widened to `u64` operations for hardware-friendly
 //!   throughput in the Hybrid encryption path.
 
 pub mod classification;
 pub mod neural;
 pub mod pqc;
+pub mod primitives;
 
 use std::path::Path;
 
@@ -140,12 +141,7 @@ pub async fn encrypt_file(
             // PQC key exchange → shared secret → deterministic neural cipher
             let (kem_ct, shared_secret) = pqc::encapsulate_key(key_file)?;
             // Derive a full-entropy seed via HMAC-SHA256(shared_secret, "aft-neural-seed")
-            use hmac::{Hmac, Mac};
-            type HmacSha256 = Hmac<sha2::Sha256>;
-            let mut mac = HmacSha256::new_from_slice(&shared_secret)
-                .map_err(|_| AftError::CryptoError("HMAC key init failed".into()))?;
-            mac.update(b"aft-neural-seed");
-            let derived = mac.finalize().into_bytes();
+            let derived = primitives::hmac_sha256(&shared_secret, &[b"aft-neural-seed"])?;
             let seed = u64::from_le_bytes(
                 derived[..8]
                     .try_into()
@@ -232,12 +228,7 @@ pub async fn decrypt_file(input: &Path, output: &Path, key_file: &Path) -> AftRe
         EncryptionMethod::Hybrid => {
             let shared_secret = pqc::decapsulate_key(kem_ct, key_file)?;
             // Re-derive the same neural cipher seed via HMAC-SHA256
-            use hmac::{Hmac, Mac};
-            type HmacSha256 = Hmac<sha2::Sha256>;
-            let mut mac = HmacSha256::new_from_slice(&shared_secret)
-                .map_err(|_| AftError::CryptoError("HMAC key init failed".into()))?;
-            mac.update(b"aft-neural-seed");
-            let derived = mac.finalize().into_bytes();
+            let derived = primitives::hmac_sha256(&shared_secret, &[b"aft-neural-seed"])?;
             let seed = u64::from_le_bytes(
                 derived[..8]
                     .try_into()

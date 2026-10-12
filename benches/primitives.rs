@@ -4,16 +4,12 @@
 //!
 //! Measures throughput of:
 //! - CRC32 (SSE4.2 / ARM CRC32 via crc32fast)
-//! - SHA-256 (SHA-NI via sha2)
-//! - AES-256-GCM encrypt + decrypt (AES-NI via aes-gcm)
+//! - SHA-256 (IronCrypto `ic-hash`, via `aft::crypto::primitives`)
+//! - AES-256-GCM encrypt + decrypt (IronCrypto `ic-cipher`, via `aft::crypto::primitives`)
 //! - Zstd compression + decompression (SIMD via libzstd)
 
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce,
-};
+use aft::crypto::primitives::{gcm_open, gcm_seal, sha256};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use sha2::{Digest, Sha256};
 
 const SIZES: &[(u64, &str)] = &[
     (1_024, "1KB"),
@@ -44,11 +40,7 @@ fn bench_sha256(c: &mut Criterion) {
         let data = make_data(size);
         group.throughput(Throughput::Bytes(size));
         group.bench_with_input(BenchmarkId::from_parameter(label), &data, |b, data| {
-            b.iter(|| {
-                let mut h = Sha256::new();
-                h.update(data);
-                h.finalize()
-            });
+            b.iter(|| sha256(data));
         });
     }
     group.finish();
@@ -57,15 +49,14 @@ fn bench_sha256(c: &mut Criterion) {
 fn bench_aes256gcm(c: &mut Criterion) {
     let key = [0x42u8; 32];
     let nonce_bytes = [0u8; 12];
-    let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = nonce_bytes;
 
     let mut group = c.benchmark_group("aes256gcm_encrypt");
     for &(size, label) in SIZES {
         let data = make_data(size);
         group.throughput(Throughput::Bytes(size));
         group.bench_with_input(BenchmarkId::from_parameter(label), &data, |b, data| {
-            b.iter(|| cipher.encrypt(nonce, data.as_ref()).unwrap());
+            b.iter(|| gcm_seal(&key, &nonce, &[], data).unwrap());
         });
     }
     group.finish();
@@ -73,10 +64,10 @@ fn bench_aes256gcm(c: &mut Criterion) {
     let mut group = c.benchmark_group("aes256gcm_decrypt");
     for &(size, label) in SIZES {
         let data = make_data(size);
-        let ciphertext = cipher.encrypt(nonce, data.as_ref()).unwrap();
+        let ciphertext = gcm_seal(&key, &nonce, &[], &data).unwrap();
         group.throughput(Throughput::Bytes(size));
         group.bench_with_input(BenchmarkId::from_parameter(label), &ciphertext, |b, ct| {
-            b.iter(|| cipher.decrypt(nonce, ct.as_ref()).unwrap());
+            b.iter(|| gcm_open(&key, &nonce, &[], ct).unwrap());
         });
     }
     group.finish();

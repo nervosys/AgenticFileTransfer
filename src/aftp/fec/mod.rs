@@ -65,18 +65,24 @@ pub const FEC_MIN_TRANSFER: u64 = 1 << 20; // 1 MiB
 /// authenticity nor confidentiality, and is appropriate only on a trusted link
 /// that never carries sensitive data.
 ///
-/// FIPS note: the KDF and the symbol AEAD both go through [`symcrypto`], which
-/// routes to the FIPS 140-3 validated `aws-lc-rs` module under `--features fips`
-/// and to the RustCrypto `hmac`/`sha2`/`aes-gcm` primitives otherwise. A FIPS
-/// build keeps the FEC data plane inside the validated boundary. See
-/// `docs/SECURITY.md`.
-pub fn derive_symbol_key(auth_token: Option<&str>, session_id: u64) -> Option<Vec<u8>> {
-    let token = auth_token?;
+/// Crypto note: the KDF and the symbol AEAD both go through [`symcrypto`], which
+/// is backed by IronCrypto. Under `--features fips` the IronCrypto FIPS self-tests
+/// run at startup. See `docs/SECURITY.md`.
+///
+/// An error means the crypto backend refused to run. It is not the same as an
+/// unauthenticated connection, and callers must not treat it as one.
+pub fn derive_symbol_key(
+    auth_token: Option<&str>,
+    session_id: u64,
+) -> crate::error::AftResult<Option<Vec<u8>>> {
+    let Some(token) = auth_token else {
+        return Ok(None);
+    };
     let key = symcrypto::hmac_sha256(
         token.as_bytes(),
         &[b"aft-fec-symbol-key-v2", &session_id.to_be_bytes()],
-    );
-    Some(key.to_vec())
+    )?;
+    Ok(Some(key.to_vec()))
 }
 
 /// A cryptographically random 64-bit session id for the FEC data plane.
@@ -87,7 +93,11 @@ pub fn derive_symbol_key(auth_token: Option<&str>, session_id: u64) -> Option<Ve
 /// makes the per-session symbol key unpredictable and unique, which is what
 /// actually gives the replay resistance the data plane relies on.
 pub fn random_session_id() -> u64 {
-    rand::RngCore::next_u64(&mut rand::rngs::OsRng)
+    let mut buf = [0u8; 8];
+    // Failure here means the OS has no entropy source, and there is no safe
+    // session id to fall back to, so this stops rather than guesses.
+    crate::crypto::primitives::random_bytes(&mut buf).expect("OS entropy unavailable");
+    u64::from_le_bytes(buf)
 }
 
 #[cfg(test)]
@@ -96,8 +106,8 @@ mod key_tests {
 
     #[test]
     fn key_is_deterministic_across_peers() {
-        let a = derive_symbol_key(Some("s3cret"), 42).unwrap();
-        let b = derive_symbol_key(Some("s3cret"), 42).unwrap();
+        let a = derive_symbol_key(Some("s3cret"), 42).unwrap().unwrap();
+        let b = derive_symbol_key(Some("s3cret"), 42).unwrap().unwrap();
         assert_eq!(a, b, "both ends must derive the same key");
         assert_eq!(a.len(), 32);
     }
@@ -105,20 +115,20 @@ mod key_tests {
     #[test]
     fn key_is_bound_to_the_session() {
         // Replaying a captured symbol into another session must not verify.
-        let s1 = derive_symbol_key(Some("s3cret"), 1).unwrap();
-        let s2 = derive_symbol_key(Some("s3cret"), 2).unwrap();
+        let s1 = derive_symbol_key(Some("s3cret"), 1).unwrap().unwrap();
+        let s2 = derive_symbol_key(Some("s3cret"), 2).unwrap().unwrap();
         assert_ne!(s1, s2);
     }
 
     #[test]
     fn key_is_bound_to_the_token() {
-        let a = derive_symbol_key(Some("one"), 7).unwrap();
-        let b = derive_symbol_key(Some("two"), 7).unwrap();
+        let a = derive_symbol_key(Some("one"), 7).unwrap().unwrap();
+        let b = derive_symbol_key(Some("two"), 7).unwrap().unwrap();
         assert_ne!(a, b);
     }
 
     #[test]
     fn unauthenticated_connections_have_no_key() {
-        assert!(derive_symbol_key(None, 7).is_none());
+        assert!(derive_symbol_key(None, 7).unwrap().is_none());
     }
 }

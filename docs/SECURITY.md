@@ -244,10 +244,10 @@ not carry CUI. See the dedicated FEC section below.
 - No minimum TLS version configuration
 - No cipher suite restriction
 - No mTLS (mutual TLS) for client certificate authentication
-- FEC symbol crypto routes through `aws-lc-rs` (FIPS 140-3) under
-  `--features fips` and RustCrypto `aes-gcm`/`hmac` otherwise; a default build
-  is therefore unvalidated for the data plane (the PQC/neural pipelines remain
-  RustCrypto regardless of the feature)
+- All AFT cryptographic primitives come from IronCrypto (`ic-*` crates), which
+  is not CMVP-validated in either build. The `--features fips` build runs
+  IronCrypto's FIPS self-tests and operational discipline, but it does not
+  carry a validation certificate (see section 3.1)
 
 **Recommendations:**
 - Add `--require-tls` server option to reject unencrypted connections
@@ -315,15 +315,16 @@ if accessible. This is a deployment consideration, not a code vulnerability.
 
 | Algorithm           | Usage                          | FIPS Approved?              | Implementation                  |
 | ------------------- | ------------------------------ | --------------------------- | ------------------------------- |
-| SHA-256             | File checksums, AFTP integrity | Yes (FIPS 180-4)            | `sha2` crate (ring backend)     |
-| SHA-512             | Optional checksum              | Yes (FIPS 180-4)            | `sha2` crate                    |
-| HMAC-SHA-256        | Challenge/response auth, FEC symbol-key KDF | Yes (FIPS 198-1)            | `hmac`+`sha2`; FEC KDF via `aws-lc-rs` under `--features fips` |
+| SHA-256             | File checksums, AFTP integrity | Yes (FIPS 180-4)            | `ic-hash` (IronCrypto)          |
+| SHA-512             | Optional checksum              | Yes (FIPS 180-4)            | `ic-hash` (IronCrypto)          |
+| HMAC-SHA-256        | Challenge/response auth, FEC symbol-key KDF | Yes (FIPS 198-1)            | `ic-mac` (IronCrypto)           |
 | CRC32               | Per-frame integrity (HW accel) | N/A (not crypto)            | `crc32fast` crate               |
-| AES-256-GCM         | TLS data encryption, PQC AEAD, FEC symbols | Yes (FIPS 197 + SP 800-38D) | `rustls`/`ring`, `aes-gcm`; FEC via `aws-lc-rs` under `--features fips` |
-| ML-KEM-1024         | Post-quantum KEM               | Yes (FIPS 203)              | `ml-kem` crate (RustCrypto)     |
-| ChaCha20-Poly1305   | TLS alternative cipher         | Not FIPS-approved           | via `rustls` + `ring`           |
-| X25519              | TLS key exchange               | Not FIPS-approved           | via `rustls` + `ring`           |
-| ECDHE-P256/P384     | TLS key exchange               | Yes (SP 800-56A)            | via `rustls` + `ring`           |
+| AES-256-GCM         | TLS data encryption, PQC AEAD, FEC symbols | Yes (FIPS 197 + SP 800-38D) | `ic-cipher` (IronCrypto); TLS via `ic-rustls` |
+| ML-KEM-1024         | Post-quantum KEM               | Yes (FIPS 203)              | `ic-mlkem` (IronCrypto)         |
+| ChaCha20-Poly1305   | TLS alternative cipher         | Not FIPS-approved           | `ic-cipher` via `ic-rustls`     |
+| X25519              | TLS key exchange               | Not FIPS-approved           | `ic-rustls`                     |
+| ECDHE-P256/P384     | TLS key exchange               | Yes (SP 800-56A)            | `ic-rustls`                     |
+| AES-256-GCM (QUIC)  | `--fec` QUIC data plane        | Yes (FIPS 197 + SP 800-38D) | `ring` via `rustls` (see note)  |
 | RSA                 | TLS signatures                 | Yes (FIPS 186-5)            | via `rustls` + `ring`           |
 | MD5                 | Optional checksum              | **No** (deprecated)         | `md-5` crate                    |
 | XOR widening (u64)  | Pre-CRC integrity layer        | N/A (not crypto)            | Custom (`src/crypto/mod.rs`)    |
@@ -339,19 +340,22 @@ The `ring` cryptographic library (used by `rustls`) is **not** a FIPS 140-2/3
 validated module. While it implements FIPS-approved algorithms correctly, it has
 not undergone CMVP validation.
 
-**FIPS Feature Flag:** AFT v1.3.0 includes an optional `fips` feature in Cargo.toml
-that switches to `aws-lc-rs` (Amazon's fork of BoringCrypto), which has FIPS 140-3
-validation (certificate #4631).
+**FIPS Feature Flag:** The optional `fips` feature runs IronCrypto's FIPS 140-3
+power-on self-tests at startup and refuses to run if they fail. It does **not**
+make AFT FIPS-validated. IronCrypto implements the FIPS 140-3 operational
+discipline but has not been submitted to or validated by the CMVP and holds no
+certificate number. AFT previously routed its FIPS build through `aws-lc-rs`
+(certificate #4631); that validated boundary is no longer in use.
 
 **Path to Compliance:**
 
-1. **Short-term:** Build with `--features fips` to use the `aws-lc-rs` backend
-   for both TLS **and** the FEC data plane (AES-256-GCM + HMAC-SHA256, via
-   `src/aftp/fec/symcrypto.rs`). Document current crypto usage and obtain a
-   waiver/exception for algorithms not yet FIPS-validated (PQC, neural).
+1. **Short-term:** Treat AFT as unvalidated for CUI until a CMVP-validated module
+   is in the cryptographic path. Document current crypto usage and obtain a
+   waiver/exception for algorithms not yet validated (PQC, neural).
 
-2. **Medium-term:** Replace `ring` with `aws-lc-rs` as the default backend.
-   `rustls` supports `aws-lc-rs` via the `aws-lc-rs` feature flag.
+2. **Medium-term:** Either obtain CMVP validation for IronCrypto, or restore a
+   validated module (for example `aws-lc-rs` via the `aws_lc_rs` rustls feature)
+   behind the `fips` feature.
 
 3. **Long-term:** Implement `--fips` CLI mode where:
    - Only FIPS-approved cipher suites are available
@@ -383,8 +387,9 @@ function remains callable programmatically; the gate is at the CLI boundary.
 **Kyber1024 / KyberSlash (RESOLVED):**  
 The `pqc_kyber 0.7.1` crate had a timing side-channel (RUSTSEC-2023-0079,
 "KyberSlash", CVSS 7.4 HIGH) and was unmaintained. **Fixed:** the PQC pipeline
-(`src/crypto/pqc.rs`) was migrated to RustCrypto's maintained **`ml-kem` 0.3.2**
-(FIPS-203 final ML-KEM-1024). This is a deliberate algorithm change — round-3
+(`src/crypto/pqc.rs`) was migrated to **ML-KEM-1024** (FIPS-203 final), first via
+RustCrypto's `ml-kem` 0.3.2 and now via IronCrypto's `ic-mlkem`. The key file format
+did not change between those two. This is a deliberate algorithm change — round-3
 Kyber1024 keys/ciphertexts are not interoperable with ML-KEM-1024 — so the key
 file format version was bumped (v1→v2) and legacy files are rejected with a
 "regenerate with `aft keygen`" error.
@@ -392,9 +397,8 @@ file format version was bumped (v1→v2) and legacy files are rejected with a
 ### 3.4 Recommendations for FIPS Mode
 
 ```toml
-# Cargo.toml change for FIPS crypto backend:
-rustls = { version = "0.23", features = ["aws_lc_rs"] }
-# Remove default ring dependency
+# Cargo.toml: the FIPS build selects IronCrypto's self-tests
+fips = ["dep:ic-fips"]
 ```
 
 Add a `--fips` CLI flag or `FIPS_MODE=1` env var that:
@@ -485,10 +489,10 @@ logged to structured audit log with source IP, session resume binds to client IP
 | SC.L2-3.13.2  | Employ architectural designs to protect CUI    | ⚠️ Partial | TLS available but not enforced              |
 | SC.L2-3.13.6  | Deny network traffic by default                | ⚠️ Partial | Connection semaphore limits, no IP ACLs     |
 | SC.L2-3.13.8  | Implement crypto mechanisms for CUI in transit | ⚠️ Partial | TLS available, FIPS feature flag present    |
-| SC.L2-3.13.11 | Employ FIPS-validated cryptography             | ⚠️ Partial | Available via `--features fips` (aws-lc-rs) |
+| SC.L2-3.13.11 | Employ FIPS-validated cryptography             | ❌ Not met | IronCrypto is not CMVP-validated; `--features fips` runs its self-tests only |
 
 **Improvements since v0.1.0:** Connection semaphore, idle timeout, session management,
-per-frame CRC32 integrity, FIPS feature flag (`aws-lc-rs` backend).
+per-frame CRC32 integrity, FIPS feature flag (IronCrypto self-tests; see section 3.1).
 
 **Recommendations:**
 - Default to TLS-enabled connections for DoD deployment
@@ -551,20 +555,27 @@ AES-256-GCM path above.
 
 ### FIPS status
 
-The FEC symbol crypto (AES-256-GCM AEAD + HMAC-SHA256 KDF) is centralized in
-`src/aftp/fec/symcrypto.rs`, which routes to the FIPS 140-3 validated
-`aws-lc-rs` module under `--features fips` and to the RustCrypto
-`aes-gcm`/`hmac`/`sha2` crates otherwise. **A `--features fips` build therefore
-places the `--fec` data plane inside the same validated boundary as the TLS
-control plane** — bulk data no longer needs to stay on the TLS path for
-validated-crypto CUI. The wire format is byte-identical across backends (a KDF
-known-answer test and the AEAD round-trip tests run under both feature sets), so
-FIPS and default peers interoperate.
+Every cryptographic primitive AFT uses comes from IronCrypto, through the single
+boundary `src/crypto/primitives.rs`: AES-256-GCM, SHA-256/512, HMAC-SHA256, the
+OS entropy source, and ML-KEM-1024. The FEC data plane (`src/aftp/fec/symcrypto.rs`)
+and the PQC pipeline call that boundary, so they are covered by the same code.
 
-A **default (non-FIPS) build** still uses RustCrypto for the data plane: the
-algorithms are FIPS-*approved* but outside the validated module. The PQC
-(`pqc_kyber`) and neural pipelines remain RustCrypto/unvalidated regardless of
-the feature — FIPS coverage now spans TLS + FEC, not those.
+**No part of AFT is FIPS-validated.** IronCrypto is FIPS-oriented: it implements
+the FIPS 140-3 operational discipline and checks against published test vectors,
+but it has not been submitted to or validated by the CMVP. `--features fips` adds
+IronCrypto's power-on self-tests, and the build refuses to start if they fail. It
+does not change the validation status. Do not describe an AFT deployment as using
+a FIPS-validated module.
+
+The wire format and key files are unchanged from the previous RustCrypto and
+aws-lc-rs backends. The AEAD and HMAC known-answer tests in `symcrypto.rs` pin the
+bytes, and the PQC path was checked by opening ciphertexts and secret keys made by
+the previous build. Peers on the old and new builds interoperate.
+
+QUIC (`--fec` over QUIC, `src/aftp/fec/quic_dgram.rs`) is the exception: it stays
+on `ring` because QUIC handshakes fail under `ic-rustls`'s packet protection.
+Other transitive dependencies also still link `ring` or `aws-lc-rs` (`rcgen`,
+`russh`, `rust-s3`, `quinn`). AFT's own code does not select them.
 
 ### Denial of service
 
@@ -660,7 +671,7 @@ the feature — FIPS coverage now spans TLS + FEC, not those.
 18. **Session resume with IP binding**: Reconnection requires same client IP + re-auth
 19. **SMB input whitelisting**: Strict character validation prevents injection
 20. **Plugin integrity verification**: SHA-256 sidecar check before loading
-21. **FIPS feature flag**: `aws-lc-rs` backend available via `--features fips`
+21. **FIPS feature flag**: IronCrypto self-tests via `--features fips` (not CMVP-validated)
 22. **Key file permissions**: PQC key files restricted to `0o600`
 
 ---
@@ -674,10 +685,9 @@ the feature — FIPS coverage now spans TLS + FEC, not those.
 | tokio      | 1.x          | Low      | Well-audited async runtime                    |
 | reqwest    | 0.12         | Low      | Uses rustls (no OpenSSL)                      |
 | rustls     | 0.23         | Low      | Memory-safe TLS, audited                      |
-| ring       | (via rustls) | Medium   | Not FIPS-validated                            |
-| sha2       | 0.10         | Low      | Pure Rust, RustCrypto project                 |
-| hmac       | 0.12         | Low      | Pure Rust, RustCrypto project                 |
-| aes-gcm    | 0.10         | Low      | Pure Rust, RustCrypto project                 |
+| ring       | (via rustls) | Medium   | Not FIPS-validated; QUIC data plane and transitive deps (rcgen, russh, rust-s3) |
+| ic-core/ic-hash/ic-mac/ic-cipher/ic-mlkem | 0.2.24 | Low | IronCrypto (AGPL-3.0); zero dependencies except ic-rustls; not CMVP-validated |
+| ic-rustls  | 0.2.24       | Low      | IronCrypto's rustls provider; TCP TLS, FTPS, AFTP over TLS |
 | rand       | 0.8          | Low      | ChaCha20-based CSPRNG                         |
 | zstd       | 0.13         | Low      | Wrapper around well-tested C library          |
 | libloading | 0.8          | Medium   | Dynamic library loading (inherently risky)    |
@@ -685,9 +695,9 @@ the feature — FIPS coverage now spans TLS + FEC, not those.
 | suppaftp   | 6.x          | Medium   | Less widely audited                           |
 | russh      | 0.62         | Low      | SSH; bumped from 0.46 (RUSTSEC-2026-0154/0153 fixed) |
 | rust-s3    | 0.37.2       | Low      | S3; bumped from 0.35 — pulls quick-xml 0.38 + webpki 0.103 (advisories cleared) |
-| ml-kem     | 0.3.2        | Low      | Post-quantum ML-KEM-1024 (RustCrypto); replaced unmaintained `pqc_kyber` |
+| ic-mlkem   | 0.2.24       | Low      | Post-quantum ML-KEM-1024 (FIPS 203), IronCrypto; replaced unmaintained `pqc_kyber` |
 | crc32fast  | 1.4          | Low      | Hardware-accelerated CRC32, widely used       |
-| aws-lc-rs  | 1.x (opt)    | Low      | FIPS 140-3 validated (cert #4631)             |
+| ic-fips    | 0.2.24 (opt) | Low      | IronCrypto FIPS self-tests; not CMVP-validated |
 
 ### `cargo audit` Results (refreshed 2026-07)
 

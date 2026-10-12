@@ -15,8 +15,8 @@ cargo build
 cargo test
 ```
 
-The optional FIPS build routes crypto through the validated `aws-lc-rs` backend
-and needs a C/C++ toolchain (cmake, clang/gcc):
+All cryptography comes from IronCrypto (the `ic-*` crates on crates.io). The
+optional `--features fips` build adds IronCrypto's FIPS self-tests:
 
 ```bash
 cargo build --features fips

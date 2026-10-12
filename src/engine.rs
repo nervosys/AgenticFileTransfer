@@ -3,7 +3,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use sha2::Digest;
+use ic_core::traits::Digest;
+use md5::Digest as _;
 use tokio::sync::Mutex;
 
 use crate::error::{AftError, AftResult};
@@ -412,7 +413,7 @@ async fn compute_and_verify_checksum(
 
     let hash_value = match config.algorithm.as_str() {
         "sha256" => {
-            let mut hasher = sha2::Sha256::new();
+            let mut hasher = ic_hash::Sha256::new();
             loop {
                 let n = file.read(&mut buf).await?;
                 if n == 0 {
@@ -423,7 +424,7 @@ async fn compute_and_verify_checksum(
             hex::encode(hasher.finalize())
         }
         "sha512" => {
-            let mut hasher = sha2::Sha512::new();
+            let mut hasher = ic_hash::Sha512::new();
             loop {
                 let n = file.read(&mut buf).await?;
                 if n == 0 {

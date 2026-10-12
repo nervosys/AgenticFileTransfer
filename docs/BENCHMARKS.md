@@ -78,8 +78,8 @@ negotiated. Powered by `crc32fast` with automatic SSE4.2 (x86_64) and CRC32
 ### SHA-256 (SHA-NI)
 
 Transfer-level integrity. Computed across the full file and sent in the
-`DATA_END` frame. Powered by `sha2` with automatic SHA-NI (x86_64) and SHA2
-(aarch64) detection.
+`DATA_END` frame. Powered by IronCrypto's `ic-hash`. The figures below were measured
+on the previous `sha2` backend and need re-measuring against `ic-hash`.
 
 | Payload | Throughput |
 | ------- | ---------- |
@@ -91,7 +91,8 @@ Transfer-level integrity. Computed across the full file and sent in the
 ### AES-256-GCM (AES-NI)
 
 Authenticated encryption for quantum-resistant file protection. Powered by
-`aes-gcm` with automatic AES-NI detection.
+IronCrypto's `ic-cipher`. The figures below predate the switch and need
+re-measuring.
 
 | Payload | Encrypt    | Decrypt    |
 | ------- | ---------- | ---------- |

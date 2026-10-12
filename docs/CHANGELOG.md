@@ -5,6 +5,25 @@ All notable changes to AFT will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Cryptography moved to the IronSecurity stack (IronCrypto).** Every primitive
+  AFT uses now comes from the `ic-*` crates, through one boundary,
+  `src/crypto/primitives.rs`: AES-256-GCM (`ic-cipher`), SHA-256/512 (`ic-hash`),
+  HMAC-SHA256 (`ic-mac`), ML-KEM-1024 (`ic-mlkem`), OS entropy (`ic-core`), and the
+  rustls provider for TCP TLS, FTPS, and AFTP-over-TLS (`ic-rustls`). Removed
+  `sha2`, `hmac`, `aes-gcm`, `ml-kem`, and `aws-lc-rs`.
+- **Wire format and key files are unchanged.** Ciphertexts and secret keys made by
+  2.0.0 still decrypt. AEAD and HMAC known-answer tests pin the bytes.
+- **`--features fips` now runs IronCrypto's FIPS self-tests** and refuses to start
+  if they fail. It is **no longer FIPS-validated**: IronCrypto has no CMVP
+  certificate, and the `aws-lc-rs` validated boundary (certificate #4631) is gone.
+- The `--fec` QUIC data plane stays on `ring`. Its handshakes fail under
+  `ic-rustls`'s packet protection, so it is pinned explicitly and not affected by
+  the process default provider.
+
 ## [2.0.0] - 2026-07-27
 
 First public release. Dual-licensed AGPL-3.0-or-later + commercial.
@@ -32,8 +51,9 @@ First public release. Dual-licensed AGPL-3.0-or-later + commercial.
   `OTEL_EXPORTER_OTLP_HEADERS` at runtime.
 - **Dual licensing** — `LICENSING.md` and `COMMERCIAL-LICENSE.md`; SPDX headers
   on all source files.
-- **FIPS build mode** (`--features fips`) now also routes the FEC data-plane
-  AEAD/KDF through the validated `aws-lc-rs` backend.
+- **FIPS build mode** (`--features fips`) once routed the FEC data-plane AEAD/KDF
+  through the validated `aws-lc-rs` backend. See the Unreleased entry: that is no
+  longer the case.
 
 ### Security
 

@@ -19,9 +19,8 @@
 //!
 //! - **CRC32**: Per-frame integrity via `crc32fast` — auto-detects SSE4.2 (x86_64)
 //!   and CRC32 (aarch64) hardware instructions (~30 GB/s).
-//! - **SHA-256**: Transfer-level integrity via `sha2` — auto-detects SHA-NI (x86_64)
-//!   and SHA2 (aarch64) extensions.
-//! - **AES-256-GCM**: Crypto subsystem via `aes-gcm` — auto-detects AES-NI.
+//! - **SHA-256**: Transfer-level integrity via IronCrypto's `ic-hash`.
+//! - **AES-256-GCM**: Crypto subsystem via IronCrypto's `ic-cipher`.
 //! - **Zstd**: Compression via libzstd C library — uses SIMD internally.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
